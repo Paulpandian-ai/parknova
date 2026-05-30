@@ -107,6 +107,35 @@ def grade_badge(grade) -> str:
     return f'<span class="badge-grade" style="background:{color}">{g}</span>'
 
 
+def bucket_chip(bucket) -> str:
+    if _missing(bucket):
+        return DASH
+    color = styles.BUCKET_COLORS.get(str(bucket), styles.MUTED)
+    return f'<span class="chip" style="background:{color}">{bucket}</span>'
+
+
+# Form-group -> (color, label) for SEC filing badges.
+_FORM_BADGE = {
+    "financials": ("#2563EB", "Financials"),
+    "material": ("#CA8A04", "Material 8-K"),
+    "offering": ("#DC2626", "Offering"),
+    "stake": ("#7C3AED", ">5% Stake"),
+    "insider": ("#475569", "Insider"),
+}
+
+
+def form_badge(group: Optional[str]) -> str:
+    if not group or group not in _FORM_BADGE:
+        return ""
+    color, label = _FORM_BADGE[group]
+    return f'<span class="chip" style="background:{color};margin-left:6px;">{label}</span>'
+
+
+def leading_badge() -> str:
+    return (f'<span class="chip" style="background:{styles.NAVY};'
+            f'margin-left:6px;">Leading</span>')
+
+
 # ---------------------------------------------------------------------------
 # Conditional colour for return / score cells
 # ---------------------------------------------------------------------------
@@ -118,6 +147,23 @@ def return_bg(frac, full_scale: float = 0.5) -> str:
     if frac >= 0:
         return f"background-color: rgba(22,163,74,{alpha:.3f}); color:{styles.TEXT};"
     return f"background-color: rgba(220,38,38,{alpha:.3f}); color:{styles.TEXT};"
+
+
+def _hex_to_rgb(h: str) -> tuple:
+    h = h.lstrip("#")
+    return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def bucket_cell_bg(bucket) -> str:
+    """Tint a Bucket cell with its palette colour (chip-like, for st.dataframe)."""
+    if _missing(bucket):
+        return ""
+    color = styles.BUCKET_COLORS.get(str(bucket))
+    if not color:
+        return ""
+    r, g, b = _hex_to_rgb(color)
+    return (f"background-color: rgba({r},{g},{b},0.16); "
+            f"color:{color}; font-weight:600;")
 
 
 def zscore_bg(val, scale: float = 1.5) -> str:
@@ -229,6 +275,57 @@ def heatmap(matrix: pd.DataFrame, cols: List[str], pct_fraction: bool = True):
     st.plotly_chart(fig, width="stretch")
 
 
+def leaderboard_bar(labels: List[str], values: List[float], title: str = "",
+                    use_bucket_colors: bool = True):
+    """Horizontal bar chart of a return per group, sorted, colored by sign.
+
+    Values are fractions; bars use the bucket palette when available, else the
+    green/red sign colors.
+    """
+    pairs = [(l, v) for l, v in zip(labels, values) if v is not None and not (
+        isinstance(v, float) and pd.isna(v))]
+    if not pairs:
+        st.info("No data for the leaderboard.")
+        return
+    pairs.sort(key=lambda p: p[1])  # ascending -> largest at top after reversed axis
+    labs = [p[0] for p in pairs]
+    vals = [p[1] * 100 for p in pairs]
+    if use_bucket_colors and all(l in styles.BUCKET_COLORS for l in labs):
+        colors = [styles.BUCKET_COLORS[l] for l in labs]
+    else:
+        colors = [styles.POSITIVE if v >= 0 else styles.NEGATIVE for v in vals]
+    fig = go.Figure(go.Bar(
+        x=vals, y=labs, orientation="h", marker_color=colors,
+        text=[fmt_pct_frac(v / 100) for v in vals], textposition="auto",
+        hovertemplate="%{y}: %{text}<extra></extra>",
+    ))
+    fig.update_layout(
+        template="plotly_white", height=max(260, 34 * len(labs) + 100), title=title,
+        margin=dict(l=10, r=10, t=40, b=10),
+        xaxis=dict(ticksuffix="%", gridcolor=styles.BORDER, zerolinecolor=styles.MUTED),
+        yaxis=dict(showgrid=False),
+    )
+    st.plotly_chart(fig, width="stretch")
+
+
+def grouped_factor_bars(names: List[str], group_vals: List[float],
+                        universe_vals: List[float], group_label: str = "Bucket"):
+    """Grouped bars comparing a group's median factor scores vs universe median."""
+    fig = go.Figure()
+    fig.add_trace(go.Bar(name=group_label, x=names, y=group_vals,
+                         marker_color=styles.PRIMARY))
+    fig.add_trace(go.Bar(name="Universe median", x=names, y=universe_vals,
+                         marker_color=styles.MUTED))
+    fig.update_layout(
+        template="plotly_white", height=340, barmode="group",
+        margin=dict(l=10, r=10, t=30, b=10),
+        yaxis=dict(range=[0, 100], gridcolor=styles.BORDER, title="Percentile"),
+        xaxis=dict(showgrid=False),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    st.plotly_chart(fig, width="stretch")
+
+
 # ---------------------------------------------------------------------------
 # News feed
 # ---------------------------------------------------------------------------
@@ -256,22 +353,127 @@ _SENTIMENT_COLORS = {"positive": styles.POSITIVE, "negative": styles.NEGATIVE,
                      "neutral": styles.MUTED}
 
 
-def news_feed(items: List[dict], limit: int = 10):
+def news_feed(items: List[dict], limit: int = 10, leading_only: bool = False):
+    from core.synthesis import is_leading_source
+
     if not items:
         st.info("No recent news available.")
         return
-    for it in items[:limit]:
+    shown = 0
+    for it in items:
+        site = it.get("site") or it.get("publisher") or ""
+        leading = is_leading_source(site)
+        if leading_only and not leading:
+            continue
         title = it.get("title") or "(untitled)"
         url = it.get("url") or "#"
-        site = it.get("site") or it.get("publisher") or ""
         when = _relative_time(it.get("publishedDate", ""))
         sentiment = it.get("sentiment")
         chip = ""
         if sentiment:
             c = _SENTIMENT_COLORS.get(str(sentiment).lower(), styles.MUTED)
             chip = f'<span class="chip" style="background:{c};margin-left:8px;">{sentiment}</span>'
+        badge = leading_badge() if leading else ""
         st.markdown(
-            f'<div class="news-item"><a href="{url}" target="_blank">{title}</a>{chip}'
+            f'<div class="news-item"><a href="{url}" target="_blank">{title}</a>'
+            f'{chip}{badge}'
             f'<div class="news-meta">{site} · {when}</div></div>',
             unsafe_allow_html=True,
         )
+        shown += 1
+        if shown >= limit:
+            break
+    if shown == 0:
+        st.info("No items from leading sources in this batch.")
+
+
+def filings_feed(filings: List[dict], limit: int = 20):
+    """Render SEC filings as labeled rows with form badges."""
+    from data.edgar_client import classify_form
+
+    if not filings:
+        st.info("No SEC filings available (CIK not found or none on file).")
+        return
+    for f in filings[:limit]:
+        form = f.get("form", "?")
+        date = f.get("filingDate", "")
+        url = f.get("url", "#")
+        badge = form_badge(classify_form(form))
+        st.markdown(
+            f'<div class="news-item">'
+            f'<a href="{url}" target="_blank">{form}</a>{badge}'
+            f'<div class="news-meta">Filed {date}</div></div>',
+            unsafe_allow_html=True,
+        )
+
+
+def holders_table(holders: List[dict], top: int = 15):
+    if not holders:
+        st.info("Institutional ownership not available (endpoint may not be on "
+                "your FMP plan).")
+        return
+    rows = []
+    for h in holders[:top]:
+        rows.append({
+            "Holder": h.get("holder") or h.get("investorName") or "?",
+            "Shares": h.get("shares"),
+            "Change": h.get("change"),
+            "Date": h.get("dateReported") or h.get("date") or "",
+        })
+    df = pd.DataFrame(rows)
+
+    def _chg(v):
+        if _missing(v):
+            return DASH
+        v = float(v)
+        return f"+{v:,.0f}" if v >= 0 else f"({abs(v):,.0f})"
+
+    def _shares(v):
+        return DASH if _missing(v) else f"{float(v):,.0f}"
+
+    styler = (df.style.format({"Shares": _shares, "Change": _chg}, na_rep=DASH)
+              .map(lambda v: return_bg(v, full_scale=5e6) if not _missing(v) else "",
+                   subset=["Change"])
+              .set_properties(**{"font-size": "0.86rem"}))
+    st.dataframe(styler, width="stretch", hide_index=True, height=420)
+
+
+def insider_table(trades: List[dict], limit: int = 25):
+    if not trades:
+        st.info("Insider transactions not available (endpoint may not be on your "
+                "FMP plan).")
+        return
+    rows = []
+    for t in trades[:limit]:
+        shares = t.get("securitiesTransacted")
+        price = t.get("price")
+        try:
+            value = abs(float(shares) * float(price)) if shares and price else None
+        except (TypeError, ValueError):
+            value = None
+        ad = str(t.get("acquisitionOrDisposition") or "").upper()
+        side = "Buy" if ad == "A" else ("Sell" if ad == "D" else
+                                        t.get("transactionType", ""))
+        rows.append({
+            "Date": t.get("transactionDate") or t.get("filingDate") or "",
+            "Insider": t.get("reportingName") or t.get("name") or "?",
+            "Role": t.get("typeOfOwner") or t.get("relationship") or "",
+            "Side": side,
+            "Value": value,
+        })
+    df = pd.DataFrame(rows)
+
+    def _v(x):
+        return DASH if _missing(x) else fmt_money_mag(x)
+
+    def _side_bg(s):
+        if s == "Buy":
+            return f"background-color: rgba(22,163,74,0.16); color:{styles.POSITIVE}; font-weight:600;"
+        if s == "Sell":
+            return f"background-color: rgba(220,38,38,0.16); color:{styles.NEGATIVE}; font-weight:600;"
+        return ""
+
+    styler = (df.style.format({"Value": _v}, na_rep=DASH)
+              .map(_side_bg, subset=["Side"])
+              .set_properties(**{"font-size": "0.86rem"}))
+    st.dataframe(styler, width="stretch", hide_index=True, height=420)

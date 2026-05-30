@@ -120,3 +120,21 @@ class FMPClient:
     def general_news(self, limit: int = 30) -> List[Dict[str, Any]]:
         data = self._get(f"{BASE_V4}/general_news", {"page": 0, "size": limit})
         return data if isinstance(data, list) else []
+
+    # ------------------------------------------------------------------
+    # Institutional & insider disclosure
+    #
+    # These endpoints may not be included on every FMP plan. Callers should
+    # treat an empty list as "no data / not on plan" and show a clear note
+    # rather than crashing.
+    # ------------------------------------------------------------------
+    def institutional_holders(self, ticker: str) -> List[Dict[str, Any]]:
+        """Top 13F institutional holders (v3/institutional-holder)."""
+        data = self._get(f"{BASE_V3}/institutional-holder/{ticker}")
+        return data if isinstance(data, list) else []
+
+    def insider_trades(self, ticker: str, limit: int = 50) -> List[Dict[str, Any]]:
+        """Recent Form 4 insider transactions (v4/insider-trading)."""
+        data = self._get(f"{BASE_V4}/insider-trading",
+                         {"symbol": ticker, "page": 0, "limit": limit})
+        return data if isinstance(data, list) else []

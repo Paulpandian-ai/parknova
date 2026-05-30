@@ -92,6 +92,7 @@ def build_performance_frame(
             "Ticker": ticker,
             "Name": meta.get("Name"),
             "Sector": meta.get("Sector"),
+            "Primary Bucket": meta.get("Primary Bucket"),
             "Stock Style Box": meta.get("Stock Style Box"),
             "Last Price": price,
             "has_live": not series.empty or bool(q),
@@ -112,17 +113,28 @@ def build_performance_frame(
     return pd.DataFrame(rows)
 
 
-def sector_heatmap(perf_df: pd.DataFrame) -> pd.DataFrame:
-    """Median return per sector (rows) x window (cols), fractions.
+def group_heatmap(perf_df: pd.DataFrame, by: str,
+                  row_order: Optional[List[str]] = None) -> pd.DataFrame:
+    """Median return per ``by`` group (rows) x window (cols), fractions.
 
-    All windows are always present as columns (NaN when a window has no data),
-    so downstream rendering can rely on a stable shape.
+    All windows are always present as columns (NaN when a window has no data).
+    ``row_order`` (if given) reindexes rows to a canonical order, dropping groups
+    not present.
     """
-    if perf_df.empty:
+    if perf_df.empty or by not in perf_df.columns:
         return pd.DataFrame(columns=ALL_WINDOWS)
     num = perf_df[ALL_WINDOWS].apply(pd.to_numeric, errors="coerce")
-    num["Sector"] = perf_df["Sector"].values
-    return num.groupby("Sector")[ALL_WINDOWS].median()
+    num[by] = perf_df[by].values
+    out = num.groupby(by)[ALL_WINDOWS].median()
+    if row_order:
+        keep = [r for r in row_order if r in out.index]
+        out = out.reindex(keep)
+    return out
+
+
+def sector_heatmap(perf_df: pd.DataFrame) -> pd.DataFrame:
+    """Median return per sector x window (fractions)."""
+    return group_heatmap(perf_df, "Sector")
 
 
 def blended_momentum_score(perf_df: pd.DataFrame) -> pd.Series:

@@ -22,6 +22,21 @@ GRADE_COLORS = {
     "D": "#EA580C", "F": "#DC2626",
 }
 
+# Primary Bucket palette (Feature A). Keyed by the full bucket label.
+BUCKET_COLORS = {
+    "1 Compute Semi": "#2563EB",
+    "2 Memory": "#7C3AED",
+    "3 Foundry/Semicap": "#0891B2",
+    "4 Networking": "#0D9488",
+    "5 Power/Cooling": "#CA8A04",
+    "6 AI Software": "#DC2626",
+    "7 Hyperscaler": "#1E3A8A",
+    "R Robotics/Autonomy": "#475569",
+    "X Edge AI/Vision": "#9333EA",
+    "Q Quantum": "#EA580C",
+    "Unclassified": "#94A3B8",
+}
+
 _CSS = f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');

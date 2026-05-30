@@ -13,6 +13,8 @@ from dotenv import load_dotenv
 
 from core import factors as fc
 from core import performance as perf
+from core import synthesis as synth
+from data import anthropic_client as anth
 from data import morningstar as ms
 from data import service
 from ui import components as cp
@@ -33,6 +35,7 @@ def sidebar_filters(df: pd.DataFrame) -> pd.DataFrame:
     with st.sidebar:
         st.markdown("### 🔎 Filters")
         st.text_input("Search ticker / name", key="search", placeholder="e.g. NVDA")
+        st.multiselect("Primary bucket", ms.bucket_options(df), key="buckets")
         st.multiselect("Sector", ms.sector_options(df), key="sectors")
         st.multiselect("Style box", ms.style_options(df), key="styles")
         st.divider()
@@ -45,6 +48,9 @@ def sidebar_filters(df: pd.DataFrame) -> pd.DataFrame:
                    "news 30m).")
 
     out = df
+    buckets = st.session_state.get("buckets", [])
+    if buckets:
+        out = out[out["Primary Bucket"].isin(buckets)]
     sectors = st.session_state.get("sectors", [])
     if sectors:
         out = out[out["Sector"].isin(sectors)]
@@ -112,24 +118,31 @@ def view_performance(perf_full: pd.DataFrame, filtered_tickers: set):
 
     st.write("")
     t_table, t_mom, t_heat = st.tabs(["📋 Returns table", "🚀 Momentum rank",
-                                      "🔥 Sector heatmap"])
+                                      "🔥 Heatmap"])
     with t_table:
         _performance_table(df, sel)
     with t_mom:
         _momentum_rank(df)
     with t_heat:
-        st.caption("Median total return per sector × window.")
-        cp.heatmap(perf.sector_heatmap(df), perf.ALL_WINDOWS, pct_fraction=True)
+        mode = st.radio("Group by", ["Bucket", "Sector"], horizontal=True,
+                        key="heat_mode")
+        st.caption(f"Median total return per {mode.lower()} × window.")
+        if mode == "Bucket":
+            mat = perf.group_heatmap(df, "Primary Bucket", ms.BUCKET_ORDER)
+        else:
+            mat = perf.group_heatmap(df, "Sector")
+        cp.heatmap(mat, perf.ALL_WINDOWS, pct_fraction=True)
 
 
 def _performance_table(df: pd.DataFrame, sort_win: str):
-    cols = ["Ticker", "Name", "Sector", "Last Price"] + perf.ALL_WINDOWS
+    cols = ["Ticker", "Name", "Primary Bucket", "Sector", "Last Price"] + perf.ALL_WINDOWS
     view = df[cols].sort_values(by=sort_win, ascending=False, na_position="last")
     fmt = {"Last Price": cp.fmt_price}
     for w in perf.ALL_WINDOWS:
         fmt[w] = lambda v: cp.fmt_pct_frac(v)
     styler = (view.style.format(fmt, na_rep=cp.DASH)
               .map(cp.return_bg, subset=perf.ALL_WINDOWS)
+              .map(cp.bucket_cell_bg, subset=["Primary Bucket"])
               .set_properties(**{"font-size": "0.88rem"}))
     st.dataframe(styler, width="stretch", hide_index=True, height=560)
 
@@ -180,7 +193,7 @@ def _fundamentals_table(full: pd.DataFrame, filtered_tickers: set):
             if c in df.columns and c not in selected_cols:
                 selected_cols.append(c)
 
-    base = ["Ticker", "Name", "Sector"]
+    base = ["Ticker", "Name", "Primary Bucket", "Sector"]
     view = df[base + selected_cols].copy()
 
     # Verdict columns rendered as HTML chips/badges/stars -> use st.markdown table
@@ -201,8 +214,9 @@ def _fundamentals_table(full: pd.DataFrame, filtered_tickers: set):
         elif c == "Morningstar Rating for Stocks":
             fmt[c] = cp.fmt_stars
 
-    styler = view.style.format(fmt, na_rep=cp.DASH).set_properties(
-        **{"font-size": "0.86rem"})
+    styler = (view.style.format(fmt, na_rep=cp.DASH)
+              .map(cp.bucket_cell_bg, subset=["Primary Bucket"])
+              .set_properties(**{"font-size": "0.86rem"}))
     st.dataframe(styler, width="stretch", hide_index=True, height=560)
     st.caption(f"{len(view)} names · {len(selected_cols)} metrics. "
                "Blanks shown as “—” (never coerced to 0).")
@@ -265,10 +279,135 @@ def view_screener(scores: pd.DataFrame, filtered_tickers: set):
 
 
 # ---------------------------------------------------------------------------
-# View: News
+# View: Buckets (slice-and-dice)
 # ---------------------------------------------------------------------------
-def view_news(full: pd.DataFrame, filtered_tickers: set):
-    st.markdown('<div class="section-title">News</div>', unsafe_allow_html=True)
+def view_buckets(full: pd.DataFrame, perf_full: pd.DataFrame,
+                 scores: pd.DataFrame, filtered_tickers: set):
+    st.markdown('<div class="section-title">Buckets — AI sub-theme slice & dice</div>',
+                unsafe_allow_html=True)
+
+    # Respect the sidebar filters for the cohort being analysed.
+    pf = perf_full[perf_full["Ticker"].isin(filtered_tickers)].reset_index(drop=True)
+    fd = full[full["Ticker"].isin(filtered_tickers)].reset_index(drop=True)
+    sc = scores[scores["Ticker"].isin(filtered_tickers)].reset_index(drop=True)
+    if pf.empty:
+        st.warning("No names match the current filters.")
+        return
+
+    win = st.selectbox("Window", perf.ALL_WINDOWS,
+                       index=perf.ALL_WINDOWS.index("1Y"), key="bucket_win")
+
+    summary = _bucket_summary(pf, fd, sc, win)
+
+    t_sum, t_board, t_drill = st.tabs(
+        ["📊 Summary", "🏆 Leaderboard", "🔬 Drill-down"])
+
+    with t_sum:
+        st.caption("One row per bucket — counts, returns, valuation, quality and "
+                   "factor medians. Sortable.")
+        _bucket_summary_table(summary, win)
+
+    with t_board:
+        st.caption(f"Median {win} return per bucket — which AI sub-theme is winning.")
+        cp.leaderboard_bar(summary["Primary Bucket"].tolist(),
+                           summary[f"Median {win}"].tolist(),
+                           title=f"Median {win} return by bucket")
+
+    with t_drill:
+        _bucket_drilldown(pf, sc, summary)
+
+
+def _bucket_summary(pf, fd, sc, win):
+    """Build the per-bucket summary frame (one row per bucket present)."""
+    fd_idx = fd.set_index("Ticker")
+    sc_idx = sc.set_index("Ticker")
+    rows = []
+    for bucket in ms.BUCKET_ORDER:
+        members = pf[pf["Primary Bucket"] == bucket]
+        if members.empty:
+            continue
+        tickers = members["Ticker"].tolist()
+        fsub = fd_idx.reindex(tickers)
+        ssub = sc_idx.reindex(tickers)
+        rows.append({
+            "Primary Bucket": bucket,
+            "Names": len(members),
+            f"Median {win}": members[win].median(skipna=True),
+            f"Mean {win}": members[win].mean(skipna=True),
+            "Median P/E": fsub["Price/Earnings"].median(skipna=True),
+            "Median ROE": fsub["Return on Equity"].median(skipna=True),
+            "Median Rev Gr (1Y)": fsub["Revenue Growth (1Y)"].median(skipna=True),
+            "Avg ★": fsub["Morningstar Rating for Stocks"].mean(skipna=True),
+            "Value": ssub["Value"].median(skipna=True),
+            "Quality": ssub["Quality"].median(skipna=True),
+            "Growth": ssub["Growth"].median(skipna=True),
+            "Momentum": ssub["Momentum"].median(skipna=True),
+        })
+    return pd.DataFrame(rows)
+
+
+def _bucket_summary_table(summary: pd.DataFrame, win: str):
+    if summary.empty:
+        st.info("No buckets to summarise.")
+        return
+    ret_cols = [f"Median {win}", f"Mean {win}"]
+    factor_cols = ["Value", "Quality", "Growth", "Momentum"]
+    fmt = {c: (lambda v: cp.fmt_pct_frac(v)) for c in ret_cols}
+    fmt["Median P/E"] = cp.fmt_mult
+    fmt["Median ROE"] = lambda v: cp.fmt_pct_unit(v)
+    fmt["Median Rev Gr (1Y)"] = lambda v: cp.fmt_pct_unit(v)
+    fmt["Avg ★"] = lambda v: cp.fmt_ratio(v)
+    for c in factor_cols:
+        fmt[c] = cp.fmt_score
+    styler = (summary.style.format(fmt, na_rep=cp.DASH)
+              .map(cp.bucket_cell_bg, subset=["Primary Bucket"])
+              .map(cp.return_bg, subset=ret_cols)
+              .map(cp.score_bg, subset=factor_cols)
+              .set_properties(**{"font-size": "0.86rem"}))
+    st.dataframe(styler, width="stretch", hide_index=True, height=440)
+
+
+def _bucket_drilldown(pf, sc, summary):
+    buckets = summary["Primary Bucket"].tolist()
+    bucket = st.selectbox("Bucket", buckets, key="drill_bucket")
+
+    # Bucket factor profile vs universe median.
+    factor_cols = fc.FACTOR_NAMES
+    bsub = sc[sc["Primary Bucket"] == bucket]
+    bvals = [bsub[n].median(skipna=True) for n in factor_cols]
+    uvals = [sc[n].median(skipna=True) for n in factor_cols]
+    st.markdown('<div class="section-title">Bucket factor profile vs universe</div>',
+                unsafe_allow_html=True)
+    cp.grouped_factor_bars(factor_cols, bvals, uvals, group_label=bucket)
+
+    # Constituents with returns + factor scores.
+    st.markdown('<div class="section-title">Constituents</div>',
+                unsafe_allow_html=True)
+    members = pf[pf["Primary Bucket"] == bucket].copy()
+    merged = members.merge(
+        sc[["Ticker"] + factor_cols], on="Ticker", how="left")
+    ret_cols = ["1M", "3M", "6M", "1Y"]
+    cols = ["Ticker", "Name", "Last Price"] + ret_cols + factor_cols
+    view = merged[cols].sort_values("1Y", ascending=False, na_position="last")
+    fmt = {"Last Price": cp.fmt_price}
+    for c in ret_cols:
+        fmt[c] = lambda v: cp.fmt_pct_frac(v)
+    for c in factor_cols:
+        fmt[c] = cp.fmt_score
+    styler = (view.style.format(fmt, na_rep=cp.DASH)
+              .map(cp.return_bg, subset=ret_cols)
+              .map(cp.score_bg, subset=factor_cols)
+              .set_properties(**{"font-size": "0.86rem"}))
+    st.dataframe(styler, width="stretch", hide_index=True, height=440)
+
+
+# ---------------------------------------------------------------------------
+# View: News & Filings (Feature B)
+# ---------------------------------------------------------------------------
+def view_news(full: pd.DataFrame, perf_full: pd.DataFrame,
+              scores: pd.DataFrame, filtered_tickers: set):
+    st.markdown('<div class="section-title">News & Filings</div>',
+                unsafe_allow_html=True)
     df = full[full["Ticker"].isin(filtered_tickers)]
     options = df["Ticker"].tolist()
     if not options:
@@ -278,11 +417,112 @@ def view_news(full: pd.DataFrame, filtered_tickers: set):
     ticker = st.selectbox("Ticker", options,
                           format_func=lambda t: f"{t} · {labels.get(t, '')}",
                           key="news_ticker")
-    if not service.has_api_key():
-        st.info("Set FMP_API_KEY to load live news.")
+    row = full[full["Ticker"] == ticker].iloc[0]
+
+    # --- Header ---
+    rating = row.get("Morningstar Rating for Stocks")
+    head = (
+        f'<div class="detail-head"><div class="name">{row.get("Name") or ticker} '
+        f'<span class="tk">{ticker}</span></div>'
+        f'<div class="meta">{cp.bucket_chip(row.get("Primary Bucket"))} &nbsp; '
+        f'<span class="stars">{cp.fmt_stars(rating)}</span> &nbsp; '
+        f'upside {cp.fmt_pct_frac(row.get("upside_pct"))}</div></div>')
+    st.markdown(head, unsafe_allow_html=True)
+
+    # --- Fetch all sources (graceful empties) ---
+    news = service.get_stock_news(ticker, limit=30) if service.has_api_key() else []
+    filings = service.get_sec_filings(ticker, limit=20)
+    insider = service.get_insider_trades(ticker) if service.has_api_key() else []
+    holders = service.get_institutional_holders(ticker) if service.has_api_key() else []
+
+    glance = synth.build_at_a_glance(row, news, filings, insider, holders)
+    _at_a_glance_cards(glance)
+    _ai_summary_card(ticker, row.get("Name") or ticker, news, filings, glance, holders)
+
+    st.write("")
+    t_news, t_sec, t_inst, t_ins = st.tabs(
+        ["📰 News", "🏛️ SEC Filings", "🏦 Institutional", "👤 Insider"])
+    with t_news:
+        if not service.has_api_key():
+            st.info("Set FMP_API_KEY to load live news.")
+        else:
+            leading = st.toggle("Leading sources only", value=False, key="lead_only")
+            cp.news_feed(news, limit=20, leading_only=leading)
+    with t_sec:
+        st.caption("Source: SEC EDGAR. 8-K = material events · 10-Q/10-K = "
+                   "financials · S-1/424B = offerings · SC 13D/G = >5% stakes.")
+        cp.filings_feed(filings, limit=20)
+    with t_inst:
+        cp.holders_table(holders)
+    with t_ins:
+        ins = glance["insider"]
+        cp.stat_card(
+            f"Net insider ({ins['days']}d)",
+            cp.fmt_money_mag(ins["net"]),
+            f"{ins['n_buy']} buys / {ins['n_sell']} sells · {ins['direction']}",
+            sign=ins["net"] if (ins["n_buy"] or ins["n_sell"]) else None)
+        st.write("")
+        cp.insider_table(insider)
+
+
+def _at_a_glance_cards(g: dict):
+    st.markdown('<div class="section-title">At a glance</div>',
+                unsafe_allow_html=True)
+    s = g["sentiment"]
+    f = g["filings"]
+    ins = g["insider"]
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        net_sent = s["positive"] - s["negative"]
+        cp.stat_card("News sentiment",
+                     f"{s['positive']}+ / {s['negative']}−",
+                     f"{s['total']} headlines", sign=net_sent)
+    with c2:
+        cp.stat_card("Filings 30d / 90d", f"{f['last30']} / {f['last90']}",
+                     "SEC EDGAR")
+    with c3:
+        has_ins = ins["n_buy"] or ins["n_sell"]
+        cp.stat_card("Net insider 90d", cp.fmt_money_mag(ins["net"]),
+                     ins["direction"], sign=ins["net"] if has_ins else None)
+    with c4:
+        cp.stat_card("Upside to FV", cp.fmt_pct_frac(g["upside_pct"]),
+                     f"{cp.fmt_stars(g['rating'])}", sign=g["upside_pct"])
+
+    changes = g["institutional"]
+    if changes and any(c["change"] is not None for c in changes):
+        bits = []
+        for c in changes:
+            if c["change"] is None:
+                continue
+            arrow = "▲" if c["change"] >= 0 else "▼"
+            bits.append(f"{c['holder']} {arrow}{abs(c['change']):,.0f}")
+        if bits:
+            st.caption("Top institutional changes: " + " · ".join(bits))
+
+
+def _ai_summary_card(ticker, name, news, filings, glance, holders):
+    """Opt-in Anthropic narrative; only shown when a key is present."""
+    if not anth.has_anthropic_key():
         return
-    items = service.get_stock_news(ticker, limit=20)
-    cp.news_feed(items, limit=15)
+    enabled = st.toggle("🤖 AI summary (generated)", value=False, key="ai_sum")
+    if not enabled:
+        return
+
+    @st.cache_data(show_spinner="Generating AI summary…")
+    def _gen(tk: str) -> str:
+        return anth.generate_summary(
+            tk, name, news, filings, glance["insider"], holders) or ""
+
+    text = _gen(ticker)
+    if text:
+        st.markdown(
+            f'<div class="news-item" style="border-color:{styles.PRIMARY};">'
+            f'<b>AI Summary (generated)</b><div class="news-meta" '
+            f'style="color:{styles.TEXT};margin-top:6px;font-size:0.92rem;">'
+            f'{text}</div></div>', unsafe_allow_html=True)
+    else:
+        st.info("AI summary unavailable right now (showing deterministic summary "
+                "above).")
 
 
 # ---------------------------------------------------------------------------
@@ -314,8 +554,8 @@ def view_detail(full: pd.DataFrame, perf_full: pd.DataFrame,
     head = (
         f'<div class="detail-head"><div class="name">{row.get("Name") or ticker} '
         f'<span class="tk">{ticker}</span></div>'
-        f'<div class="meta">{row.get("Sector") or ""} · '
-        f'{row.get("Stock Style Box") or ""} &nbsp; '
+        f'<div class="meta">{cp.bucket_chip(row.get("Primary Bucket"))} &nbsp; '
+        f'{row.get("Sector") or ""} · {row.get("Stock Style Box") or ""} &nbsp; '
         f'<span class="stars">{cp.fmt_stars(rating)}</span> &nbsp; '
         f'{cp.moat_chip(moat)}</div></div>'
     )
@@ -374,13 +614,19 @@ def view_detail(full: pd.DataFrame, perf_full: pd.DataFrame,
                 unsafe_allow_html=True)
     _detail_fundamentals(row)
 
-    # --- News ---
-    st.markdown('<div class="section-title">Latest news</div>',
+    # --- Compact News & Filings ---
+    st.markdown('<div class="section-title">News & filings</div>',
                 unsafe_allow_html=True)
-    if service.has_api_key():
-        cp.news_feed(service.get_stock_news(ticker, limit=12), limit=10)
-    else:
-        st.info("Set FMP_API_KEY to load live news.")
+    nf_news, nf_sec = st.columns(2)
+    with nf_news:
+        st.caption("Latest news")
+        if service.has_api_key():
+            cp.news_feed(service.get_stock_news(ticker, limit=12), limit=6)
+        else:
+            st.info("Set FMP_API_KEY to load live news.")
+    with nf_sec:
+        st.caption("Recent SEC filings")
+        cp.filings_feed(service.get_sec_filings(ticker, limit=10), limit=6)
 
 
 def _detail_fundamentals(row: pd.Series):
@@ -452,10 +698,11 @@ def main():
     scores = fc.compute_factor_scores(merged)
     scores.insert(0, "Ticker", merged["Ticker"].values)
     scores.insert(1, "Name", merged["Name"].values)
-    scores.insert(2, "Sector", merged["Sector"].values)
+    scores.insert(2, "Primary Bucket", merged["Primary Bucket"].values)
+    scores.insert(3, "Sector", merged["Sector"].values)
 
     tabs = st.tabs(["📈 Performance", "📊 Fundamentals & Factors", "🧪 Screener",
-                    "📰 News", "🔍 Stock Detail"])
+                    "🧩 Buckets", "📰 News & Filings", "🔍 Stock Detail"])
     with tabs[0]:
         view_performance(perf_full, filtered_tickers)
     with tabs[1]:
@@ -463,8 +710,10 @@ def main():
     with tabs[2]:
         view_screener(scores, filtered_tickers)
     with tabs[3]:
-        view_news(full, filtered_tickers)
+        view_buckets(full, perf_full, scores, filtered_tickers)
     with tabs[4]:
+        view_news(full, perf_full, scores, filtered_tickers)
+    with tabs[5]:
         view_detail(full, perf_full, scores, filtered_tickers)
 
 

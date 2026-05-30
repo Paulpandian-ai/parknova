@@ -8,28 +8,51 @@ curated universe of ~226 AI-related stocks.
 | Source | Role | Used for |
 | --- | --- | --- |
 | **Morningstar Excel** (`AI_Equities_Universe_Data from MorningStar.xlsx`) | Primary, static | **All** fundamentals, valuation, profitability, growth, financial health, Morningstar moat/rating/fair-value, and trailing returns (YTD/1Y/3Y/5Y). |
-| **Financial Modeling Prep (FMP)** | Live, secondary | **Only** short-window momentum (Today/1W/1M/3M/6M, from daily adjusted-close history) and per-ticker news. |
+| **`bucket_mapping.csv`** | Static taxonomy | Curated **Primary Bucket** per ticker (the 10 AI sub-themes) + secondary bucket weights. Left-joined on `Ticker`. |
+| **Financial Modeling Prep (FMP)** | Live, secondary | Short-window momentum (Today/1W/1M/3M/6M from daily adjusted-close), news, and (if your plan includes them) institutional 13F + insider Form-4 data. |
+| **SEC EDGAR** | Live, authoritative | Recent SEC filings (10-K/Q, 8-K, S-1/424B, SC 13D/G). Free; requires a descriptive User-Agent. |
+| **Anthropic API** *(optional)* | Opt-in | An AI narrative summary on the News & Filings view, only when `ANTHROPIC_API_KEY` is set and the toggle is on. |
 
 Fundamentals are never fetched from an API; live prices/returns for the short
 windows are never read from the spreadsheet.
 
+## The Primary Bucket taxonomy (`bucket_mapping.csv`)
+
+Morningstar's `Sector` is too coarse for AI analysis (NVDA/MU/ASML all land in
+"Technology"; CEG/VST/OKLO in "Utilities"/"Energy"). A curated taxonomy of 10
+buckets is used instead, joined onto the Morningstar frame on `Ticker`:
+
+`1 Compute Semi` · `2 Memory` · `3 Foundry/Semicap` · `4 Networking` ·
+`5 Power/Cooling` · `6 AI Software` · `7 Hyperscaler` · `R Robotics/Autonomy` ·
+`X Edge AI/Vision` · `Q Quantum`
+
+Every ticker gets a bucket; any unmapped ticker falls back to `Unclassified`
+(logged, never a crash). Secondary bucket weights (e.g. `"1:0.70/4:0.20/6:0.10"`)
+are parsed into a dict for future exposure-splitting. Buckets are a first-class
+filter and grouping dimension across the app, rendered as colored chips.
+
 ## Features
 
 - **Performance & Momentum** — merges Morningstar YTD/1Y/3Y/5Y with live
-  Today/1W/1M/3M/6M, color-coded and sortable, plus a blended-momentum ranking
-  and a sector × window median-return heatmap.
+  Today/1W/1M/3M/6M, color-coded and sortable, with a Primary-Bucket column +
+  filter, a blended-momentum ranking, and a median-return heatmap with a
+  **Bucket / Sector toggle**.
 - **Fundamentals & Factors** — a fundamentals table with toggleable metric
-  groups (Valuation / Profitability / Growth / Financial Health / Morningstar
-  Verdicts / Statement Absolutes), and a cross-sectional **factor-scoring** table
-  (Value, Quality, Growth, Financial Health, Momentum, Morningstar Upside) shown
-  as 0–100 percentiles.
-- **Screener** — adjust factor weights with sliders to re-rank the universe live
-  by the weighted composite.
-- **News** — clean FMP news feed per ticker (headline, source, relative time,
-  sentiment chip, link).
-- **Stock Detail** — header with rating ★, moat chip and fair-value upside; live
-  Plotly price chart with a window selector; the 9 return windows as stat cards;
-  a factor radar vs the universe median; grouped fundamentals; and a news feed.
+  groups, and a cross-sectional **factor-scoring** table (Value, Quality, Growth,
+  Financial Health, Momentum, Morningstar Upside) shown as 0–100 percentiles.
+- **Screener** — adjust factor weights with sliders to re-rank the universe live.
+- **Buckets** (slice-and-dice) — a per-bucket summary table (counts, returns,
+  median P/E/ROE/Rev-growth, median factor scores, avg ★), a return leaderboard
+  bar chart, a constituent drill-down, and a bucket-vs-universe factor profile.
+- **News & Filings** — for a selected ticker: a deterministic "At a glance"
+  digest (news sentiment tally, filing counts 30/90d, net 90-day insider $, top
+  institutional changes, implied upside), an optional AI summary, then tabs for
+  News (with a "leading sources only" toggle), SEC Filings (badged), Institutional
+  holders, and Insider transactions.
+- **Stock Detail** — header with bucket chip, rating ★, moat chip and fair-value
+  upside; live Plotly price chart with a window selector; the 9 return windows as
+  stat cards; a factor radar vs the universe median; grouped fundamentals; and a
+  compact News & Filings pane.
 
 ## Factor methodology (`core/factors.py`, pure & testable)
 
@@ -53,9 +76,19 @@ platform-set environment variable:
 ```bash
 cp .env.example .env
 # edit .env -> FMP_API_KEY=your_real_key
+# optional: ANTHROPIC_API_KEY=...   (enables the opt-in AI summary)
 ```
 
-> The Morningstar views work without a key; live momentum and news need it.
+> The Morningstar views (fundamentals, factors, buckets) work without any key.
+> Live momentum, news, and insider/institutional data need `FMP_API_KEY`. SEC
+> filings need no key. The AI summary appears only when `ANTHROPIC_API_KEY` is
+> set and the toggle is on.
+
+### SEC EDGAR User-Agent
+
+SEC requires a descriptive `User-Agent` on every request. The default in
+`data/edgar_client.py` (`ParkNova research contact@parknova.app`) works; edit it
+to your own contact string if you prefer.
 
 ## Run
 
@@ -63,34 +96,42 @@ cp .env.example .env
 streamlit run app.py
 ```
 
-> **Note:** `AI_Equities_Universe_Data from MorningStar.xlsx` must be in the
-> project root — the app loads the universe from it on startup.
+> **Note:** both `AI_Equities_Universe_Data from MorningStar.xlsx` and
+> `bucket_mapping.csv` must be in the project root.
 
 ## Project structure
 
 ```
 app.py                  # entry, nav, layout, CSS injection
-data/morningstar.py     # load + clean the Excel (column registry, type coercion, missing handling)
-data/fmp_client.py      # FMP wrapper: history, quotes, news (session, retries, batching)
-data/service.py         # Streamlit-cached live data access
-core/performance.py     # merge Morningstar trailing returns + live momentum windows
+data/morningstar.py     # load + clean the Excel + join bucket_mapping.csv taxonomy
+data/fmp_client.py      # FMP wrapper: history, quotes, news, institutional, insider
+data/edgar_client.py    # SEC EDGAR: CIK resolution + recent filings (mandatory UA)
+data/anthropic_client.py# optional opt-in LLM narrative (guarded by env key)
+data/service.py         # Streamlit-cached live data access (FMP + EDGAR)
+core/performance.py     # merge Morningstar trailing returns + live momentum; heatmaps
 core/factors.py         # z-score/winsorize, factor composites, weighted ranking
-ui/styles.py            # CSS + theme constants
-ui/components.py        # cards, tables, charts, chips/badges, radar, news feed
+core/synthesis.py       # deterministic "At a glance" digest (pure functions)
+ui/styles.py            # CSS + theme constants + bucket palette
+ui/components.py        # cards, tables, charts, chips/badges, radar, news/filings feeds
 .streamlit/config.toml  # white/blue theme
+bucket_mapping.csv      # curated Primary Bucket taxonomy
 ```
 
 ## Engineering notes
 
-- **Caching:** Morningstar load + factor inputs are cached for the session
-  (static). Live quotes/history are cached 15 min; news 30 min. Each ticker's
-  history is fetched once and sliced locally for every momentum window and the
-  detail chart. A **Refresh live data** button clears only the live caches.
-- **Defensive FMP:** timeouts, HTTP errors, empty bodies and a single 429 retry
-  with back-off all degrade to "—" rather than crashing.
+- **Caching:** Morningstar load + bucket join + factor inputs are cached for the
+  session (static). Live quotes/history 15 min; news 30 min; institutional /
+  insider / EDGAR 1 day. Each ticker's history is fetched once and sliced locally
+  for every momentum window and the detail chart. A **Refresh live data** button
+  clears only the live caches.
+- **Defensive network:** timeouts, HTTP errors, empty bodies and a single 429
+  retry with back-off all degrade to "—"/"no data" rather than crashing. If an
+  FMP plan doesn't include the institutional/insider endpoints, the view shows a
+  clear "not available on current data plan" note.
 - **Data-quality reality:** Morningstar coverage is partial (P/E ~151/226, moat
   ~118/226, etc.) and many high-growth names are unprofitable. Percent columns
   are kept in percent units (never ×100); large absolutes are formatted B/M;
   blanks render as "—" everywhere and are never coerced to 0.
-- Only the Morningstar file and FMP are used as data sources.
+- Data sources are limited to the Morningstar file, `bucket_mapping.csv`, FMP,
+  SEC EDGAR, and the optional Anthropic API.
 ```

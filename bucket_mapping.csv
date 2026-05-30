@@ -1,0 +1,227 @@
+Ticker,Name,Primary Bucket Code,Primary Bucket,Secondary Bucket Weights
+ACMR,ACM Research Inc Class A,3,3 Foundry/Semicap,3:1.00
+ADBE,Adobe Inc,6,6 AI Software,6:1.00
+AEIS,Advanced Energy Industries Inc,3,3 Foundry/Semicap,3:0.70/5:0.30
+AMD,Advanced Micro Devices Inc,1,1 Compute Semi,1:0.85/4:0.10/6:0.05
+AEHR,Aehr Test Systems,3,3 Foundry/Semicap,3:1.00
+AVAV,AeroVironment Inc,R,R Robotics/Autonomy,R:0.70/6:0.30
+AEVA,Aeva Technologies Inc Ordinary Shares,X,X Edge AI/Vision,X:1.00
+LIDR,AEye Inc Ordinary Shares - Class A,X,X Edge AI/Vision,X:1.00
+AKAM,Akamai Technologies Inc,6,6 AI Software,6:1.00
+BABA,Alibaba Group Holding Ltd ADR,7,7 Hyperscaler,7:0.60/6:0.40
+GOOGL,Alphabet Inc Class A,7,7 Hyperscaler,7:0.50/6:0.30/1:0.10/4:0.10
+AMZN,Amazon.com Inc,7,7 Hyperscaler,7:0.60/6:0.20/1:0.10/5:0.10
+AMBA,Ambarella Inc,1,1 Compute Semi,1:0.60/X:0.30/R:0.10
+AMT,American Tower Corp,5,5 Power/Cooling,5:0.30/Comms:0.70
+AMKR,Amkor Technology Inc,3,3 Foundry/Semicap,3:1.00
+ASYS,Amtech Systems Inc,3,3 Foundry/Semicap,3:1.00
+APLD,Applied Digital Corp,5,5 Power/Cooling,5:0.70/7:0.30
+AMAT,Applied Materials Inc,3,3 Foundry/Semicap,3:1.00
+AAOI,Applied Optoelectronics Inc,4,4 Networking,4:1.00
+APP,AppLovin Corp Ordinary Shares - Class A,6,6 AI Software,6:1.00
+ANET,Arista Networks Inc,4,4 Networking,4:0.90/6:0.10
+ARM,ARM Holdings PLC ADR,1,1 Compute Semi,1:0.70/6:0.30
+ARQQ,Arqit Quantum Inc,Q,Q Quantum,Q:1.00
+ARRY,Array Technologies Inc Ordinary Shares,5,5 Power/Cooling,5:1.00
+ASML,ASML Holding NV ADR,3,3 Foundry/Semicap,3:1.00
+ASTS,AST SpaceMobile Inc Ordinary Shares - Class A,5,5 Power/Cooling,5:0.50/6:0.50
+ALAB,Astera Labs Inc,1,1 Compute Semi,1:0.50/4:0.50
+TEAM,Atlassian Corp Class A,6,6 AI Software,6:1.00
+ATOM,Atomera Inc,3,3 Foundry/Semicap,3:1.00
+AUR,Aurora Innovation Inc Class A,R,R Robotics/Autonomy,R:1.00
+ACLS,Axcelis Technologies Inc,3,3 Foundry/Semicap,3:1.00
+AXTI,AXT Inc,3,3 Foundry/Semicap,3:1.00
+BIDU,Baidu Inc ADR,7,7 Hyperscaler,7:0.40/6:0.40/R:0.20
+BSY,Bentley Systems Inc Ordinary Shares - Class B,6,6 AI Software,6:1.00
+BBAI,BigBear.ai Holdings Inc,6,6 AI Software,6:1.00
+BILI,Bilibili Inc ADR,6,6 AI Software,6:0.60/Cons:0.40
+BTBT,Bit Digital Inc Ordinary Shares,5,5 Power/Cooling,5:0.40/7:0.60
+BAH,Booz Allen Hamilton Holding Corp Class A,6,6 AI Software,6:1.00
+BRZE,Braze Inc Class A,6,6 AI Software,6:1.00
+AVGO,Broadcom Inc,1,1 Compute Semi,1:0.55/4:0.30/6:0.15
+BWXT,BWX Technologies Inc,5,5 Power/Cooling,5:1.00
+AI,C3.ai Inc Ordinary Shares - Class A,6,6 AI Software,6:1.00
+CDNS,Cadence Design Systems Inc,6,6 AI Software,6:0.50/3:0.50
+CCJ,Cameco Corp,5,5 Power/Cooling,5:1.00
+CAMT,Camtek Ltd,3,3 Foundry/Semicap,3:1.00
+CARR,Carrier Global Corp Ordinary Shares,5,5 Power/Cooling,5:1.00
+LEU,Centrus Energy Corp Class A,5,5 Power/Cooling,5:1.00
+CBRS,Cerebras Systems Inc Class A,1,1 Compute Semi,1:0.70/7:0.20/6:0.10
+CEVA,CEVA Inc,X,X Edge AI/Vision,X:1.00
+CIEN,Ciena Corp,4,4 Networking,4:1.00
+CIFR,Cipher Digital Inc,5,5 Power/Cooling,5:0.40/7:0.60
+CSCO,Cisco Systems Inc,4,4 Networking,4:0.80/6:0.20
+NET,Cloudflare Inc,6,6 AI Software,6:0.70/4:0.30
+CGNX,Cognex Corp,X,X Edge AI/Vision,X:1.00
+COHR,Coherent Corp,4,4 Networking,4:1.00
+COHU,Cohu Inc,3,3 Foundry/Semicap,3:1.00
+CEG,Constellation Energy Corp,5,5 Power/Cooling,5:1.00
+CORZ,Core Scientific Inc Ordinary Shares - New,5,5 Power/Cooling,5:0.50/7:0.50
+CRWV,CoreWeave Inc Ordinary Shares - Class A,7,7 Hyperscaler,7:0.80/5:0.20
+GLW,Corning Inc,4,4 Networking,4:0.40/5:0.20/X:0.40
+CRDO,Credo Technology Group Holding Ltd,4,4 Networking,4:0.60/1:0.40
+CRWD,CrowdStrike Holdings Inc Class A,6,6 AI Software,6:1.00
+QBTS,D-Wave Quantum Inc,Q,Q Quantum,Q:1.00
+DDOG,Datadog Inc Class A,6,6 AI Software,6:1.00
+DELL,Dell Technologies Inc Ordinary Shares - Class C,5,5 Power/Cooling,5:0.50/1:0.30/6:0.20
+DLR,Digital Realty Trust Inc,5,5 Power/Cooling,5:1.00
+DOMO,Domo Inc,6,6 AI Software,6:1.00
+DOV,Dover Corp,5,5 Power/Cooling,5:0.80/R:0.20
+DUK,Duke Energy Corp,5,5 Power/Cooling,5:1.00
+DUOL,Duolingo Inc,6,6 AI Software,6:1.00
+DUOT,Duos Technologies Group Inc,Unclassified,Unclassified,
+DY,Dycom Industries Inc,5,5 Power/Cooling,5:1.00
+DT,Dynatrace Inc Ordinary Shares,6,6 AI Software,6:1.00
+ETN,Eaton Corp PLC,5,5 Power/Cooling,5:1.00
+ECL,Ecolab Inc,5,5 Power/Cooling,5:0.80/6:0.20
+ESTC,Elastic NV,6,6 AI Software,6:1.00
+EMR,Emerson Electric Co,5,5 Power/Cooling,5:0.80/6:0.20
+ENPH,Enphase Energy Inc,5,5 Power/Cooling,5:1.00
+ENTG,Entegris Inc,3,3 Foundry/Semicap,3:1.00
+EQIX,Equinix Inc,5,5 Power/Cooling,5:1.00
+FN,Fabrinet,4,4 Networking,4:1.00
+FSLR,First Solar Inc,5,5 Power/Cooling,5:1.00
+FIVN,Five9 Inc,6,6 AI Software,6:1.00
+FRSX,Foresight Autonomous Holdings Ltd ADR,R,R Robotics/Autonomy,R:1.00
+FORM,FormFactor Inc,3,3 Foundry/Semicap,3:1.00
+FTNT,Fortinet Inc,6,6 AI Software,6:1.00
+FUTU,Futu Holdings Ltd ADR,6,6 AI Software,6:0.50/Fin:0.50
+GDS,GDS Holdings Ltd ADR,5,5 Power/Cooling,5:1.00
+GEV,GE Vernova Inc,5,5 Power/Cooling,5:1.00
+GD,General Dynamics Corp,R,R Robotics/Autonomy,R:0.30/6:0.30/Def:0.40
+GTLB,GitLab Inc Class A,6,6 AI Software,6:1.00
+GLBE,Global E Online Ltd,6,6 AI Software,6:1.00
+HSAI,Hesai Group ADR,X,X Edge AI/Vision,X:1.00
+HPE,Hewlett Packard Enterprise Co,5,5 Power/Cooling,5:0.60/1:0.20/6:0.20
+HUBB,Hubbell Inc,5,5 Power/Cooling,5:1.00
+HUBS,HubSpot Inc,6,6 AI Software,6:1.00
+HUT,Hut 8 Corp,5,5 Power/Cooling,5:0.40/7:0.60
+ICHR,Ichor Holdings Ltd,3,3 Foundry/Semicap,3:1.00
+INDI,Indie Semiconductor Inc Ordinary Shares - Class A,1,1 Compute Semi,1:0.60/R:0.40
+INFY,Infosys Ltd ADR,6,6 AI Software,6:1.00
+INOD,Innodata Inc,6,6 AI Software,6:1.00
+INVZ,Innoviz Technologies Ltd,X,X Edge AI/Vision,X:1.00
+INTC,Intel Corp,1,1 Compute Semi,1:0.60/3:0.40
+IBM,International Business Machines Corp,7,7 Hyperscaler,7:0.30/6:0.50/1:0.10/Q:0.10
+INTT,inTest Corp,3,3 Foundry/Semicap,3:1.00
+INTU,Intuit Inc,6,6 AI Software,6:1.00
+LUNR,Intuitive Machines Inc Ordinary Shares - Class A,R,R Robotics/Autonomy,R:0.50/6:0.50
+ISRG,Intuitive Surgical Inc,R,R Robotics/Autonomy,R:1.00
+IONQ,IonQ Inc Class A,Q,Q Quantum,Q:1.00
+IPGP,IPG Photonics Corp,3,3 Foundry/Semicap,3:0.70/4:0.30
+IREN,IREN Ltd,5,5 Power/Cooling,5:0.60/7:0.40
+IRM,Iron Mountain Inc,5,5 Power/Cooling,5:0.60/Other:0.40
+JD,JD.com Inc ADR,6,6 AI Software,6:0.60/Cons:0.40
+JCI,Johnson Controls International PLC Registered Shares,5,5 Power/Cooling,5:1.00
+KEYS,Keysight Technologies Inc,3,3 Foundry/Semicap,3:0.70/4:0.30
+KC,Kingsoft Cloud Holdings Ltd ADR,7,7 Hyperscaler,7:0.70/6:0.30
+KXIAY,Kioxia Holdings Corp ADR,2,2 Memory,2:1.00
+KLAC,KLA Corp,3,3 Foundry/Semicap,3:1.00
+KVYO,Klaviyo Inc Class A common stock,6,6 AI Software,6:1.00
+KTOS,Kratos Defense & Security Solutions Inc,R,R Robotics/Autonomy,R:0.70/6:0.30
+KLIC,Kulicke & Soffa Industries Inc,3,3 Foundry/Semicap,3:1.00
+KULR,KULR Technology Group Inc,X,X Edge AI/Vision,X:1.00
+LHX,L3Harris Technologies Inc,R,R Robotics/Autonomy,R:0.40/6:0.30/Def:0.30
+LRCX,Lam Research Corp,3,3 Foundry/Semicap,3:1.00
+LDOS,Leidos Holdings Inc,6,6 AI Software,6:1.00
+LI,Li Auto Inc ADR,R,R Robotics/Autonomy,R:1.00
+LMT,Lockheed Martin Corp,R,R Robotics/Autonomy,R:0.30/6:0.30/Def:0.40
+LITE,Lumentum Holdings Inc,4,4 Networking,4:1.00
+MTSI,MACOM Technology Solutions Holdings Inc,4,4 Networking,4:0.70/1:0.30
+MRVL,Marvell Technology Inc,1,1 Compute Semi,1:0.50/4:0.50
+META,Meta Platforms Inc Class A,7,7 Hyperscaler,7:0.40/6:0.40/1:0.20
+MU,Micron Technology Inc,2,2 Memory,2:0.90/1:0.10
+MSFT,Microsoft Corp,7,7 Hyperscaler,7:0.55/6:0.35/1:0.05/5:0.05
+MVIS,Microvision Inc,X,X Edge AI/Vision,X:1.00
+MKSI,MKS Inc,3,3 Foundry/Semicap,3:1.00
+MBLY,Mobileye Global Inc Ordinary Shares - Class A,R,R Robotics/Autonomy,1:0.50/R:0.50
+MNDY,Monday.Com Ltd Ordinary Shares,6,6 AI Software,6:1.00
+MDB,MongoDB Inc Class A,6,6 AI Software,6:1.00
+MPWR,Monolithic Power Systems Inc,1,1 Compute Semi,1:0.70/5:0.30
+NNE,Nano Nuclear Energy Inc,5,5 Power/Cooling,5:1.00
+NVTS,Navitas Semiconductor Corp Class A,1,1 Compute Semi,1:0.60/5:0.40
+NBIS,Nebius Group NV Shs Class-A-,7,7 Hyperscaler,7:0.80/5:0.20
+NTAP,NetApp Inc,2,2 Memory,2:0.70/6:0.30
+NEE,NextEra Energy Inc,5,5 Power/Cooling,5:1.00
+NICE,NICE Ltd ADR,6,6 AI Software,6:1.00
+NIO,NIO Inc ADR,R,R Robotics/Autonomy,R:1.00
+NOC,Northrop Grumman Corp,R,R Robotics/Autonomy,R:0.30/6:0.30/Def:0.40
+NVMI,Nova Ltd,3,3 Foundry/Semicap,3:1.00
+NRG,NRG Energy Inc,5,5 Power/Cooling,5:1.00
+SMR,NuScale Power Corp Class A,5,5 Power/Cooling,5:1.00
+NVT,nVent Electric PLC,5,5 Power/Cooling,5:1.00
+NVDA,NVIDIA Corp,1,1 Compute Semi,1:0.70/4:0.20/6:0.10
+NXPI,NXP Semiconductors NV,1,1 Compute Semi,1:0.70/X:0.30
+OKLO,Oklo Inc Class A Shares,5,5 Power/Cooling,5:1.00
+OKTA,Okta Inc Class A,6,6 AI Software,6:1.00
+ONDS,Ondas Inc,R,R Robotics/Autonomy,R:1.00
+ONTO,Onto Innovation Inc,3,3 Foundry/Semicap,3:1.00
+ORCL,Oracle Corp,7,7 Hyperscaler,7:0.50/6:0.40/5:0.10
+OUST,Ouster Inc Ordinary Shares - Class A,X,X Edge AI/Vision,X:0.70/R:0.30
+PLTR,Palantir Technologies Inc Ordinary Shares - Class A,6,6 AI Software,6:1.00
+PANW,Palo Alto Networks Inc,6,6 AI Software,6:1.00
+PDD,PDD Holdings Inc ADR,6,6 AI Software,6:0.50/Cons:0.50
+PEGA,Pegasystems Inc,6,6 AI Software,6:1.00
+PLAB,Photronics Inc,3,3 Foundry/Semicap,3:1.00
+POET,POET Technologies Inc,4,4 Networking,4:1.00
+PONY,Pony AI Inc ADR,R,R Robotics/Autonomy,R:1.00
+PLPC,Preformed Line Products Co,5,5 Power/Cooling,5:1.00
+QCOM,Qualcomm Inc,1,1 Compute Semi,1:0.80/4:0.10/X:0.10
+PWR,Quanta Services Inc,5,5 Power/Cooling,5:1.00
+QUBT,Quantum Computing Inc,Q,Q Quantum,Q:1.00
+RMBS,Rambus Inc,1,1 Compute Semi,1:0.60/2:0.40
+RXRX,Recursion Pharmaceuticals Inc Class A,6,6 AI Software,6:0.50/Health:0.50
+RDDT,Reddit Inc Class A Shares,6,6 AI Software,6:1.00
+RR,Richtech Robotics Inc Class B Common Stock,R,R Robotics/Autonomy,R:1.00
+RGTI,Rigetti Computing Inc,Q,Q Quantum,Q:1.00
+RBLX,Roblox Corp Ordinary Shares - Class A,6,6 AI Software,6:1.00
+ROK,Rockwell Automation Inc,R,R Robotics/Autonomy,R:1.00
+RTX,RTX Corp,R,R Robotics/Autonomy,R:0.30/6:0.30/Def:0.40
+CRM,Salesforce Inc,6,6 AI Software,6:1.00
+SSNLF,Samsung Electronics Co Ltd,2,2 Memory,2:0.50/1:0.30/3:0.20
+SNDK,SanDisk Corp Ordinary Shares,2,2 Memory,2:1.00
+STX,Seagate Technology Holdings PLC,2,2 Memory,2:1.00
+S,SentinelOne Inc Class A,6,6 AI Software,6:1.00
+SERV,Serve Robotics Inc,R,R Robotics/Autonomy,R:1.00
+NOW,ServiceNow Inc,6,6 AI Software,6:1.00
+SHLS,Shoals Technologies Group Inc Ordinary Shares - Class A,5,5 Power/Cooling,5:1.00
+SLAB,Silicon Laboratories Inc,1,1 Compute Semi,1:0.70/X:0.30
+HXSCL,SK Hynix Inc DR,2,2 Memory,2:0.90/1:0.10
+SNOW,Snowflake Inc Ordinary Shares,6,6 AI Software,6:1.00
+SOLV,Solventum Corp,5,5 Power/Cooling,5:1.00
+SONY,Sony Group Corp ADR,6,6 AI Software,6:0.30/Cons:0.70
+SOUN,SoundHound AI Inc Ordinary Shares - Class A,6,6 AI Software,6:1.00
+SO,Southern Co,5,5 Power/Cooling,5:1.00
+CXM,Sprinklr Inc Class A,6,6 AI Software,6:1.00
+SMCI,Super Micro Computer Inc,5,5 Power/Cooling,5:0.60/1:0.40
+SYM,Symbotic Inc Ordinary Shares - Class A,R,R Robotics/Autonomy,R:1.00
+SNPS,Synopsys Inc,6,6 AI Software,6:0.50/3:0.50
+TSM,Taiwan Semiconductor Manufacturing Co Ltd ADR,3,3 Foundry/Semicap,3:0.90/1:0.10
+TLN,Talen Energy Corp Ordinary Shares New,5,5 Power/Cooling,5:1.00
+TEM,Tempus AI Inc Class A common stock,6,6 AI Software,6:1.00
+TCEHY,Tencent Holdings Ltd ADR,7,7 Hyperscaler,7:0.40/6:0.60
+TER,Teradyne Inc,3,3 Foundry/Semicap,3:0.70/R:0.30
+WULF,TeraWulf Inc,5,5 Power/Cooling,5:0.40/7:0.60
+TSLA,Tesla Inc,R,R Robotics/Autonomy,R:0.50/1:0.20/6:0.30
+CC,The Chemours Co,5,5 Power/Cooling,5:0.50/Mat:0.50
+TM,Toyota Motor Corp ADR,R,R Robotics/Autonomy,R:0.30/Cons:0.70
+TT,Trane Technologies PLC Class A,5,5 Power/Cooling,5:1.00
+TWLO,Twilio Inc Class A,6,6 AI Software,6:1.00
+PATH,UiPath Inc Class A,6,6 AI Software,6:1.00
+UCTT,Ultra Clean Holdings Inc,3,3 Foundry/Semicap,3:1.00
+VECO,Veeco Instruments Inc,3,3 Foundry/Semicap,3:1.00
+VEEV,Veeva Systems Inc Class A,6,6 AI Software,6:1.00
+VRT,Vertiv Holdings Co Class A,5,5 Power/Cooling,5:1.00
+VWAV,VisionWave Holdings Inc,R,R Robotics/Autonomy,R:1.00
+VST,Vistra Corp,5,5 Power/Cooling,5:1.00
+VNET,VNET Group Inc ADR,5,5 Power/Cooling,5:1.00
+WRD,WeRide Inc ADR,R,R Robotics/Autonomy,R:1.00
+WDC,Western Digital Corp,2,2 Memory,2:1.00
+WLDN,Willdan Group Inc,5,5 Power/Cooling,5:1.00
+WIT,Wipro Ltd ADR,6,6 AI Software,6:1.00
+WDAY,Workday Inc Class A,6,6 AI Software,6:1.00
+XIACY,Xiaomi Corp ADR,R,R Robotics/Autonomy,1:0.30/R:0.40/Cons:0.30
+XPEV,XPeng Inc ADR,R,R Robotics/Autonomy,R:1.00
+ZBRA,Zebra Technologies Corp Ordinary Shares - Class A,X,X Edge AI/Vision,X:1.00
+ZETA,Zeta Global Holdings Corp Class A,6,6 AI Software,6:1.00
+ZS,Zscaler Inc,6,6 AI Software,6:1.00

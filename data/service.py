@@ -13,15 +13,23 @@ from typing import Dict, List
 import pandas as pd
 import streamlit as st
 
+from data.edgar_client import EDGARClient
 from data.fmp_client import FMPClient, FMPError
 
 MOMENTUM_TTL = 900       # 15 min
 NEWS_TTL = 1800          # 30 min
+DISCLOSURE_TTL = 86_400  # 1 day (institutional / insider)
+EDGAR_TTL = 86_400       # 1 day
 
 
 @st.cache_resource
 def get_client() -> FMPClient:
     return FMPClient()
+
+
+@st.cache_resource
+def get_edgar_client() -> EDGARClient:
+    return EDGARClient()
 
 
 def has_api_key() -> bool:
@@ -63,9 +71,54 @@ def get_general_news(limit: int = 30) -> List[dict]:
     return get_client().general_news(limit=limit)
 
 
+# ---------------------------------------------------------------------------
+# Institutional & insider disclosure (FMP) — may be plan-gated -> empty list
+# ---------------------------------------------------------------------------
+@st.cache_data(ttl=DISCLOSURE_TTL, show_spinner=False)
+def get_institutional_holders(ticker: str) -> List[dict]:
+    try:
+        return get_client().institutional_holders(ticker)
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=DISCLOSURE_TTL, show_spinner=False)
+def get_insider_trades(ticker: str, limit: int = 50) -> List[dict]:
+    try:
+        return get_client().insider_trades(ticker, limit=limit)
+    except Exception:
+        return []
+
+
+# ---------------------------------------------------------------------------
+# SEC EDGAR (no key; mandatory User-Agent handled in the client)
+# ---------------------------------------------------------------------------
+@st.cache_data(ttl=EDGAR_TTL, show_spinner=False)
+def get_cik_map() -> Dict[str, str]:
+    try:
+        return get_edgar_client().ticker_cik_map()
+    except Exception:
+        return {}
+
+
+@st.cache_data(ttl=EDGAR_TTL, show_spinner=False)
+def get_sec_filings(ticker: str, limit: int = 20) -> List[dict]:
+    """Recent SEC filings for a ticker. Empty list when CIK unknown / on error."""
+    try:
+        cik = get_cik_map().get(ticker.upper())
+        if not cik:
+            return []
+        return get_edgar_client().recent_filings(cik, limit=limit)
+    except Exception:
+        return []
+
+
 def clear_live_caches() -> None:
-    """Clear only the live FMP caches (Morningstar load is untouched)."""
+    """Clear the live caches (Morningstar load + EDGAR CIK map are untouched)."""
     get_history.clear()
     get_quotes_batch.clear()
     get_stock_news.clear()
     get_general_news.clear()
+    get_institutional_holders.clear()
+    get_insider_trades.clear()
+    get_sec_filings.clear()

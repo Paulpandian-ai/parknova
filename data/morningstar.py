@@ -20,15 +20,30 @@ Design notes / data-quality reality handled here:
 
 from __future__ import annotations
 
+import logging
 import os
-from typing import Dict, List
+import re
+from typing import Dict, List, Optional
 
 import pandas as pd
 import streamlit as st
 
+logger = logging.getLogger("parknova.morningstar")
+
 # The uploaded file uses spaces (not underscores) before "from MorningStar".
 EXCEL_FILENAME = "AI_Equities_Universe_Data from MorningStar.xlsx"
 SHEET = "AI Equity Analysis"
+
+# Curated Primary Bucket taxonomy (Feature A). Joined from bucket_mapping.csv.
+BUCKET_MAPPING_FILENAME = "bucket_mapping.csv"
+UNCLASSIFIED = "Unclassified"
+# Canonical bucket order (code -> label), used for ordering/options everywhere.
+BUCKET_ORDER: List[str] = [
+    "1 Compute Semi", "2 Memory", "3 Foundry/Semicap", "4 Networking",
+    "5 Power/Cooling", "6 AI Software", "7 Hyperscaler", "R Robotics/Autonomy",
+    "X Edge AI/Vision", "Q Quantum", UNCLASSIFIED,
+]
+_VALID_BUCKETS = set(BUCKET_ORDER) - {UNCLASSIFIED}
 
 # --- Identity / price -------------------------------------------------------
 ID_COLS = ["Ticker", "Name", "Sector", "Stock Style Box", "Last Price",
@@ -200,7 +215,90 @@ def load_morningstar(path: str | None = None) -> pd.DataFrame:
         upside = (fv - lp) / lp.where(lp != 0)
         df = pd.concat([df, upside.rename("upside_pct")], axis=1)
 
+    # Join the curated Primary Bucket taxonomy (Feature A).
+    df = _join_buckets(df, os.path.dirname(p))
+
     df = df.copy().reset_index(drop=True)  # de-fragment
+    return df
+
+
+# ---------------------------------------------------------------------------
+# Primary Bucket taxonomy (Feature A)
+# ---------------------------------------------------------------------------
+def parse_secondary_weights(raw: object) -> Dict[str, float]:
+    """Parse ``"1:0.70/4:0.20/6:0.10"`` -> ``{"1": 0.70, "4": 0.20, "6": 0.10}``.
+
+    Returns an empty dict for blanks/unparseable input. Keys are bucket codes
+    (the leading token of a bucket label, e.g. "1", "R", "Q").
+    """
+    if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+        return {}
+    text = str(raw).strip()
+    if not text or text.lower() == "nan":
+        return {}
+    out: Dict[str, float] = {}
+    for part in re.split(r"[/,]", text):
+        part = part.strip()
+        if not part or ":" not in part:
+            continue
+        code, _, w = part.partition(":")
+        code = code.strip()
+        try:
+            out[code] = float(w.strip())
+        except ValueError:
+            continue
+    return out
+
+
+def _load_bucket_mapping(root: str) -> Optional[pd.DataFrame]:
+    path = os.path.join(root or os.getcwd(), BUCKET_MAPPING_FILENAME)
+    if not os.path.exists(path):
+        logger.warning("bucket_mapping.csv not found at %s; all tickers will be "
+                       "Unclassified.", path)
+        return None
+    try:
+        m = pd.read_csv(path, dtype=str)
+    except Exception as exc:  # malformed file -> degrade, do not crash
+        logger.warning("Failed reading bucket_mapping.csv: %s", exc)
+        return None
+    m["Ticker"] = m["Ticker"].astype(str).str.strip().str.upper()
+    return m
+
+
+def _join_buckets(df: pd.DataFrame, root: str) -> pd.DataFrame:
+    """Left-join Primary Bucket / code / secondary weights onto ``df`` by Ticker.
+
+    Every ticker gets a bucket; unmapped or invalid -> ``Unclassified`` (logged).
+    """
+    mapping = _load_bucket_mapping(root)
+    if mapping is not None:
+        keep = ["Ticker", "Primary Bucket Code", "Primary Bucket",
+                "Secondary Bucket Weights"]
+        present = [c for c in keep if c in mapping.columns]
+        df = df.merge(mapping[present], on="Ticker", how="left")
+    # Ensure columns exist even when the mapping was missing entirely.
+    for col in ["Primary Bucket Code", "Primary Bucket", "Secondary Bucket Weights"]:
+        if col not in df.columns:
+            df[col] = None
+
+    # Validate / normalise the primary bucket; fall back to Unclassified.
+    def _norm_bucket(v: object) -> str:
+        if v is None or (isinstance(v, float) and pd.isna(v)):
+            return UNCLASSIFIED
+        s = str(v).strip()
+        return s if s in _VALID_BUCKETS else UNCLASSIFIED
+
+    df["Primary Bucket"] = df["Primary Bucket"].map(_norm_bucket)
+    df["Primary Bucket Code"] = df["Primary Bucket"].map(
+        lambda b: b.split(" ", 1)[0] if b != UNCLASSIFIED else UNCLASSIFIED)
+
+    # Parsed secondary weights (dict per row) for future exposure-splitting.
+    df["secondary_weights"] = df["Secondary Bucket Weights"].map(parse_secondary_weights)
+
+    missing = df.loc[df["Primary Bucket"] == UNCLASSIFIED, "Ticker"].tolist()
+    if missing:
+        logger.warning("%d ticker(s) Unclassified (no valid bucket): %s",
+                       len(missing), ", ".join(missing))
     return df
 
 
@@ -210,3 +308,9 @@ def sector_options(df: pd.DataFrame) -> List[str]:
 
 def style_options(df: pd.DataFrame) -> List[str]:
     return sorted(df["Stock Style Box"].dropna().unique().tolist())
+
+
+def bucket_options(df: pd.DataFrame) -> List[str]:
+    """Buckets present in ``df``, returned in canonical taxonomy order."""
+    present = set(df["Primary Bucket"].dropna().unique())
+    return [b for b in BUCKET_ORDER if b in present]
