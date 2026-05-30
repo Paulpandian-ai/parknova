@@ -12,6 +12,9 @@ env/
 # Streamlit
 .streamlit/secrets.toml
 
+# On-disk filing-analysis cache
+.cache/
+
 # OS / editor
 .DS_Store
 .idea/

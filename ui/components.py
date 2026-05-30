@@ -407,6 +407,55 @@ def filings_feed(filings: List[dict], limit: int = 20):
         )
 
 
+def filing_row_header(form: str, date: str, url: str, cached: bool = False) -> None:
+    """Compact header line for one filing in the analysis panel."""
+    from data.edgar_client import classify_form
+    badge = form_badge(classify_form(form))
+    cached_tag = (f'<span class="chip" style="background:{styles.MUTED};'
+                  f'margin-left:6px;">cached</span>' if cached else "")
+    st.markdown(
+        f'<div style="margin:2px 0 -6px;">'
+        f'<a href="{url}" target="_blank" style="color:{styles.NAVY};'
+        f'font-weight:600;text-decoration:none;">{form}</a>{badge}{cached_tag}'
+        f'<span class="news-meta" style="margin-left:8px;">Filed {date}</span>'
+        f'</div>', unsafe_allow_html=True)
+
+
+def filing_analysis_result(result: dict) -> None:
+    """Render a structured filing-analysis result card."""
+    if not result:
+        return
+    if result.get("error"):
+        st.warning(result["error"])
+        return
+    text = result.get("text")
+    if not text:
+        st.warning("Analysis unavailable (the model returned no text).")
+        return
+    meta_bits = []
+    model = result.get("model")
+    if model:
+        meta_bits.append(model)
+    if result.get("cached"):
+        meta_bits.append("cached")
+    if result.get("method") in ("sections", "truncated"):
+        meta_bits.append(f"input: {result['method']}")
+    if result.get("truncated"):
+        meta_bits.append("truncated")
+    usage = result.get("usage") or {}
+    if usage.get("input_tokens") is not None:
+        meta_bits.append(f"{usage.get('input_tokens')}→"
+                         f"{usage.get('output_tokens')} tok")
+    meta = " · ".join(str(m) for m in meta_bits)
+    safe = (text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            .replace("\n", "<br>"))
+    st.markdown(
+        f'<div class="news-item" style="border-color:{styles.PRIMARY};">'
+        f'<div class="news-meta" style="margin-bottom:6px;">{meta}</div>'
+        f'<div style="font-size:0.92rem;color:{styles.TEXT};">{safe}</div></div>',
+        unsafe_allow_html=True)
+
+
 def holders_table(holders: List[dict], top: int = 15):
     if not holders:
         st.info("Institutional ownership not available (endpoint may not be on "

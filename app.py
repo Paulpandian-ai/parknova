@@ -451,7 +451,7 @@ def view_news(full: pd.DataFrame, perf_full: pd.DataFrame,
     with t_sec:
         st.caption("Source: SEC EDGAR. 8-K = material events · 10-Q/10-K = "
                    "financials · S-1/424B = offerings · SC 13D/G = >5% stakes.")
-        cp.filings_feed(filings, limit=20)
+        _sec_filings_panel(ticker, filings)
     with t_inst:
         cp.holders_table(holders)
     with t_ins:
@@ -523,6 +523,105 @@ def _ai_summary_card(ticker, name, news, filings, glance, holders):
     else:
         st.info("AI summary unavailable right now (showing deterministic summary "
                 "above).")
+
+
+# ---------------------------------------------------------------------------
+# SEC Filings panel with on-demand, disk-cached LLM analysis
+# ---------------------------------------------------------------------------
+_MATERIAL_FORMS = {"8-K", "8-K/A", "10-Q", "10-Q/A", "10-K", "10-K/A", "6-K",
+                   "20-F", "S-1"}
+
+
+def _run_filing_analysis(ticker: str, f: dict, model: str) -> dict:
+    """Fetch -> trim -> analyze one filing (uses disk cache; spinner on miss)."""
+    accn = f.get("accessionNumber", "")
+    cached = service.filing_analysis_cached(accn, model) is not None
+    if cached:
+        return service.analyze_filing(
+            accn, model, f.get("cik"), f.get("primaryDocument", ""),
+            f.get("form", ""), f.get("filingDate", ""), ticker)
+    with st.spinner("Fetching filing & running AI analysis…"):
+        return service.analyze_filing(
+            accn, model, f.get("cik"), f.get("primaryDocument", ""),
+            f.get("form", ""), f.get("filingDate", ""), ticker)
+
+
+def _sec_filings_panel(ticker: str, filings: list):
+    if not filings:
+        cp.filings_feed(filings, limit=20)  # shows the graceful empty message
+        return
+
+    # No Anthropic key -> metadata list still works; hide analyze affordances.
+    if not anth.has_anthropic_key():
+        st.info("Set ANTHROPIC_API_KEY to enable on-demand filing analysis. "
+                "(The filing list below still works without it.)")
+        cp.filings_feed(filings, limit=20)
+        return
+
+    model = anth.MODEL_CHOICES[st.selectbox(
+        "Analysis model", list(anth.MODEL_CHOICES.keys()), index=0,
+        key="filing_model",
+        help="Haiku is cheapest/fastest. Sonnet gives a deeper read on "
+             "important filings.")]
+    st.caption("Runs a **paid AI analysis** on a filing (cached to disk after "
+               "the first run — never re-charged).")
+
+    # State: which analyses to show this run (accession -> result).
+    show: dict = st.session_state.setdefault("_filing_show", {})
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        latest = next((f for f in filings
+                       if f.get("form") in _MATERIAL_FORMS), None)
+        disabled = latest is None
+        if st.button("✨ Analyze latest filing", width="stretch",
+                     disabled=disabled, key="analyze_latest"):
+            res = _run_filing_analysis(ticker, latest, model)
+            show[latest.get("accessionNumber", "")] = res
+    with col_b:
+        if st.button("🧵 Analyze recent filing activity", width="stretch",
+                     key="analyze_activity"):
+            _run_activity_synthesis(ticker, filings[:5], model)
+
+    # Multi-filing synthesis result (if produced this session).
+    syn = st.session_state.get("_filing_activity")
+    if syn:
+        st.markdown('<div class="section-title">Recent filing activity</div>',
+                    unsafe_allow_html=True)
+        cp.filing_analysis_result(syn)
+
+    st.write("")
+    # Per-filing rows, each with its own Analyze button.
+    for f in filings[:20]:
+        accn = f.get("accessionNumber", "")
+        on_disk = service.filing_analysis_cached(accn, model) is not None
+        cp.filing_row_header(f.get("form", "?"), f.get("filingDate", ""),
+                             f.get("url", "#"), cached=on_disk)
+        btn_label = "View cached analysis" if on_disk else "Analyze"
+        has_doc = bool(f.get("primaryDocument"))
+        if st.button(btn_label, key=f"an_{accn}", disabled=not has_doc):
+            show[accn] = _run_filing_analysis(ticker, f, model)
+        if not has_doc:
+            st.caption("No primary document to analyze for this filing.")
+        if accn in show:
+            cp.filing_analysis_result(show[accn])
+
+
+def _run_activity_synthesis(ticker: str, filings: list, model: str):
+    """Build the multi-filing synthesis, reusing per-filing cached analyses."""
+    items = []
+    for f in filings:
+        accn = f.get("accessionNumber", "")
+        prior = service.filing_analysis_cached(accn, model)
+        items.append({
+            "form": f.get("form", "?"),
+            "filingDate": f.get("filingDate", ""),
+            "accessionNumber": accn,
+            "analysis": (prior or {}).get("text", "") if prior else "",
+        })
+    with st.spinner("Synthesizing recent filing activity…"):
+        st.session_state["_filing_activity"] = service.analyze_filing_activity(
+            ticker, model, items)
 
 
 # ---------------------------------------------------------------------------

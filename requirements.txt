@@ -6,3 +6,5 @@ requests>=2.31
 plotly>=5.20
 python-dotenv>=1.0
 scipy>=1.11
+beautifulsoup4>=4.12
+lxml>=5.0

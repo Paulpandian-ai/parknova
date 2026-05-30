@@ -11,7 +11,7 @@ curated universe of ~226 AI-related stocks.
 | **`bucket_mapping.csv`** | Static taxonomy | Curated **Primary Bucket** per ticker (the 10 AI sub-themes) + secondary bucket weights. Left-joined on `Ticker`. |
 | **Financial Modeling Prep (FMP)** | Live, secondary | Short-window momentum (Today/1W/1M/3M/6M from daily adjusted-close), news, and (if your plan includes them) institutional 13F + insider Form-4 data. |
 | **SEC EDGAR** | Live, authoritative | Recent SEC filings (10-K/Q, 8-K, S-1/424B, SC 13D/G). Free; requires a descriptive User-Agent. |
-| **Anthropic API** *(optional)* | Opt-in | An AI narrative summary on the News & Filings view, only when `ANTHROPIC_API_KEY` is set and the toggle is on. |
+| **Anthropic API** *(optional)* | Opt-in | An AI narrative summary on the News & Filings view, plus **on-demand, per-filing AI analysis** — only when `ANTHROPIC_API_KEY` is set; never auto-run. |
 
 Fundamentals are never fetched from an API; live prices/returns for the short
 windows are never read from the spreadsheet.
@@ -49,6 +49,17 @@ filter and grouping dimension across the app, rendered as colored chips.
   institutional changes, implied upside), an optional AI summary, then tabs for
   News (with a "leading sources only" toggle), SEC Filings (badged), Institutional
   holders, and Insider transactions.
+- **On-demand filing analysis** (SEC Filings tab) — each filing has an "Analyze"
+  button plus an "Analyze latest filing" shortcut and an "Analyze recent filing
+  activity" synthesis. On click only, the app fetches the real document from
+  EDGAR's archives, converts HTML → clean text, trims it for cost (full text for
+  8-K/6-K/13D-G; MD&A + Risk Factors + Results-of-Operations section-extraction
+  for 10-K/10-Q, with a first-40k-char fallback and a hard 60k-char cap), and
+  sends it to Anthropic for a structured summary (what/why · material facts ·
+  risks · net read). Results are **cached to disk by accession number + model**,
+  so a filing is analyzed at most once ever (survives restarts) and re-opening
+  shows it instantly with a "cached" tag and no API call. Model is selectable
+  (Haiku default for cost; Sonnet for a deeper read). Nothing runs on page load.
 - **Stock Detail** — header with bucket chip, rating ★, moat chip and fair-value
   upside; live Plotly price chart with a window selector; the 9 return windows as
   stat cards; a factor radar vs the universe median; grouped fundamentals; and a
@@ -105,25 +116,35 @@ streamlit run app.py
 app.py                  # entry, nav, layout, CSS injection
 data/morningstar.py     # load + clean the Excel + join bucket_mapping.csv taxonomy
 data/fmp_client.py      # FMP wrapper: history, quotes, news, institutional, insider
-data/edgar_client.py    # SEC EDGAR: CIK resolution + recent filings (mandatory UA)
-data/anthropic_client.py# optional opt-in LLM narrative (guarded by env key)
-data/service.py         # Streamlit-cached live data access (FMP + EDGAR)
+data/edgar_client.py    # SEC EDGAR: CIK resolution, filings, document fetch + HTML→text + trim
+data/anthropic_client.py# opt-in LLM: narrative summary + per-filing analysis (configurable model)
+data/service.py         # Streamlit-cached live data access (FMP + EDGAR) + filing analysis
 core/performance.py     # merge Morningstar trailing returns + live momentum; heatmaps
 core/factors.py         # z-score/winsorize, factor composites, weighted ranking
 core/synthesis.py       # deterministic "At a glance" digest (pure functions)
+core/filing_cache.py    # on-disk cache for LLM filing analyses (.cache/filings/)
 ui/styles.py            # CSS + theme constants + bucket palette
 ui/components.py        # cards, tables, charts, chips/badges, radar, news/filings feeds
 .streamlit/config.toml  # white/blue theme
 bucket_mapping.csv      # curated Primary Bucket taxonomy
+.cache/                 # disk-persisted filing analyses (gitignored)
 ```
 
 ## Engineering notes
 
 - **Caching:** Morningstar load + bucket join + factor inputs are cached for the
   session (static). Live quotes/history 15 min; news 30 min; institutional /
-  insider / EDGAR 1 day. Each ticker's history is fetched once and sliced locally
-  for every momentum window and the detail chart. A **Refresh live data** button
-  clears only the live caches.
+  insider / EDGAR / filing-document text 1 day. Each ticker's history is fetched
+  once and sliced locally for every momentum window and the detail chart. LLM
+  filing analyses are cached **to disk** (`.cache/filings/`, keyed by accession
+  number + model) so a filing is analyzed at most once ever — this cache survives
+  restarts and is deliberately *not* cleared by the **Refresh live data** button
+  (a filing's content never changes).
+- **Cost discipline (filing analysis):** nothing runs on page load or tab switch;
+  every analysis is click-triggered. Long filings are section-extracted (10-K/Q)
+  or truncated with disclosure, then hard-capped at 60k chars before the call.
+  Default model is Haiku; Sonnet is opt-in per analysis. A cache hit makes no API
+  call and is tagged "cached".
 - **Defensive network:** timeouts, HTTP errors, empty bodies and a single 429
   retry with back-off all degrade to "—"/"no data" rather than crashing. If an
   FMP plan doesn't include the institutional/insider endpoints, the view shows a

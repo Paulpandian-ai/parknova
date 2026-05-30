@@ -8,11 +8,12 @@ The FMP client (holds a requests session, not hashable) lives in cache_resource.
 
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import pandas as pd
 import streamlit as st
 
+from core import filing_cache
 from data.edgar_client import EDGARClient
 from data.fmp_client import FMPClient, FMPError
 
@@ -113,8 +114,86 @@ def get_sec_filings(ticker: str, limit: int = 20) -> List[dict]:
         return []
 
 
+# ---------------------------------------------------------------------------
+# On-demand filing analysis (document fetch + LLM), persisted to disk so a
+# filing is analyzed at most once ever (survives restarts).
+# ---------------------------------------------------------------------------
+@st.cache_data(ttl=EDGAR_TTL, show_spinner=False)
+def get_filing_document_text(cik: int, accession_number: str,
+                             primary_document: str) -> str:
+    """Cleaned plain text of a filing's primary document ("" on failure)."""
+    try:
+        return get_edgar_client().fetch_document_text(
+            cik, accession_number, primary_document)
+    except Exception:
+        return ""
+
+
+def filing_analysis_cached(accession_number: str, model: str) -> Optional[dict]:
+    """Return a previously-saved on-disk analysis, or None (no API call)."""
+    return filing_cache.load(accession_number, model)
+
+
+def analyze_filing(accession_number: str, model: str, cik: int,
+                   primary_document: str, form: str,
+                   filing_date: str, ticker: str) -> dict:
+    """Fetch -> trim -> LLM-analyze a single filing, persisting to disk.
+
+    If an analysis for ``(accession_number, model)`` already exists on disk it is
+    returned instantly with ``cached=True`` and NO network/API call is made.
+    Returns ``{text, usage, model, method, truncated, cached, error?}``.
+    """
+    existing = filing_cache.load(accession_number, model)
+    if existing is not None:
+        existing["cached"] = True
+        return existing
+
+    from data import anthropic_client as anth
+    from data.edgar_client import trim_for_analysis
+
+    raw = get_filing_document_text(cik, accession_number, primary_document)
+    if not raw:
+        return {"text": None, "usage": None, "model": model, "method": "none",
+                "truncated": False, "cached": False,
+                "error": "Could not fetch filing document from EDGAR."}
+    trimmed = trim_for_analysis(form, raw)
+    result = anth.analyze_filing(form, filing_date, ticker, trimmed["text"],
+                                 model=model, truncated=trimmed["truncated"])
+    result["method"] = trimmed["method"]
+    result["truncated"] = trimmed["truncated"]
+    result["cached"] = False
+    if result.get("text"):
+        filing_cache.save(accession_number, model, result)
+    return result
+
+
+def analyze_filing_activity(ticker: str, model: str,
+                            items: List[dict]) -> dict:
+    """Multi-filing synthesis, persisted to disk under a synthetic key.
+
+    Cache key is the joined accession numbers + model, so re-running the same
+    set of filings returns instantly.
+    """
+    accn_key = "ACT_" + "_".join(i.get("accessionNumber", "") for i in items)
+    existing = filing_cache.load(accn_key, model)
+    if existing is not None:
+        existing["cached"] = True
+        return existing
+
+    from data import anthropic_client as anth
+    result = anth.analyze_filing_activity(ticker, items, model=model)
+    result["cached"] = False
+    if result.get("text"):
+        filing_cache.save(accn_key, model, result)
+    return result
+
+
 def clear_live_caches() -> None:
-    """Clear the live caches (Morningstar load + EDGAR CIK map are untouched)."""
+    """Clear the live caches (Morningstar load + EDGAR CIK map are untouched).
+
+    NOTE: the disk-persisted filing analyses are intentionally NOT cleared here —
+    a filing's content never changes, so its analysis is valid forever.
+    """
     get_history.clear()
     get_quotes_batch.clear()
     get_stock_news.clear()
