@@ -422,7 +422,7 @@ def filing_row_header(form: str, date: str, url: str, cached: bool = False) -> N
 
 
 def filing_analysis_result(result: dict) -> None:
-    """Render a structured filing-analysis result card."""
+    """Render a free-text filing-analysis result card (paid-API path)."""
     if not result:
         return
     if result.get("error"):
@@ -447,13 +447,96 @@ def filing_analysis_result(result: dict) -> None:
         meta_bits.append(f"{usage.get('input_tokens')}→"
                          f"{usage.get('output_tokens')} tok")
     meta = " · ".join(str(m) for m in meta_bits)
-    safe = (text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            .replace("\n", "<br>"))
+    safe = _esc(text).replace("\n", "<br>")
     st.markdown(
         f'<div class="news-item" style="border-color:{styles.PRIMARY};">'
         f'<div class="news-meta" style="margin-bottom:6px;">{meta}</div>'
         f'<div style="font-size:0.92rem;color:{styles.TEXT};">{safe}</div></div>',
         unsafe_allow_html=True)
+
+
+def _esc(s) -> str:
+    return (str(s).replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;"))
+
+
+_SENTIMENT_CHIP = {"positive": styles.POSITIVE, "negative": styles.NEGATIVE,
+                   "neutral": styles.MUTED}
+
+
+def imported_analysis_result(obj: dict) -> None:
+    """Render a structured analysis imported from the sec-filing-analyzer skill.
+
+    Shows: an 'Imported · analyzed in Claude' tag, what_and_why, material_facts,
+    key_figures (small table), guidance_changes, risks_or_flags, a sentiment
+    chip, and net_read. No API call ever.
+    """
+    a = (obj or {}).get("analysis") or {}
+    parts = []
+
+    by = obj.get("analyzed_by") or "Claude (Max plan) via sec-filing-analyzer skill"
+    when = obj.get("analyzed_at") or ""
+    trunc = " · truncated source" if obj.get("truncated") else ""
+    tag = (f'<span class="chip" style="background:{styles.POSITIVE};">'
+           f'Imported · analyzed in Claude</span>')
+    meta = _esc(f"{by}{(' · ' + when) if when else ''}{trunc}")
+    parts.append(f'<div style="margin-bottom:6px;">{tag}'
+                 f'<span class="news-meta" style="margin-left:8px;">{meta}'
+                 f'</span></div>')
+
+    sentiment = str(a.get("sentiment") or "").lower()
+    if sentiment in _SENTIMENT_CHIP:
+        parts.append(f'<span class="chip" style="background:'
+                     f'{_SENTIMENT_CHIP[sentiment]};margin-bottom:8px;">'
+                     f'{_esc(a.get("sentiment"))}</span>')
+
+    def _section(title, body_html):
+        return (f'<div style="margin-top:8px;"><b style="color:{styles.NAVY};">'
+                f'{title}</b><div style="font-size:0.92rem;color:{styles.TEXT};'
+                f'margin-top:2px;">{body_html}</div></div>')
+
+    if a.get("what_and_why"):
+        parts.append(_section("What &amp; why", _esc(a["what_and_why"])))
+
+    facts = a.get("material_facts") or []
+    if isinstance(facts, list) and facts:
+        items = "".join(f"<li>{_esc(x)}</li>" for x in facts)
+        parts.append(_section("Material facts", f"<ul style='margin:4px 0 0 "
+                                                 f"18px;'>{items}</ul>"))
+
+    figs = a.get("key_figures") or []
+    if isinstance(figs, list) and figs:
+        rows = ""
+        for kf in figs:
+            if not isinstance(kf, dict):
+                continue
+            rows += (f"<tr><td style='padding:2px 10px 2px 0;color:{styles.MUTED};'>"
+                     f"{_esc(kf.get('label',''))}</td>"
+                     f"<td style='padding:2px 10px 2px 0;font-weight:600;'>"
+                     f"{_esc(kf.get('value',''))}</td>"
+                     f"<td style='padding:2px 0;color:{styles.MUTED};'>"
+                     f"{_esc(kf.get('context',''))}</td></tr>")
+        if rows:
+            parts.append(_section("Key figures",
+                                  f"<table style='border-collapse:collapse;'>"
+                                  f"{rows}</table>"))
+
+    guidance = a.get("guidance_changes")
+    if guidance:
+        parts.append(_section("Guidance changes", _esc(guidance)))
+
+    risks = a.get("risks_or_flags") or []
+    if isinstance(risks, list) and risks:
+        items = "".join(f"<li>{_esc(x)}</li>" for x in risks)
+        parts.append(_section("Risks / flags", f"<ul style='margin:4px 0 0 "
+                                                f"18px;'>{items}</ul>"))
+
+    if a.get("net_read"):
+        parts.append(_section("Net read", f"<i>{_esc(a['net_read'])}</i>"))
+
+    st.markdown(
+        f'<div class="news-item" style="border-color:{styles.POSITIVE};">'
+        + "".join(parts) + "</div>", unsafe_allow_html=True)
 
 
 def holders_table(holders: List[dict], top: int = 15):

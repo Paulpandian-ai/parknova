@@ -130,8 +130,25 @@ def get_filing_document_text(cik: int, accession_number: str,
 
 
 def filing_analysis_cached(accession_number: str, model: str) -> Optional[dict]:
-    """Return a previously-saved on-disk analysis, or None (no API call)."""
+    """Return a previously-saved on-disk (paid-API) analysis, or None."""
     return filing_cache.load(accession_number, model)
+
+
+# ---------------------------------------------------------------------------
+# Imported skill analyses (primary, zero-cost path)
+# ---------------------------------------------------------------------------
+def get_imported_analyses() -> Dict[str, dict]:
+    """Index of imported skill analyses keyed by normalized accession."""
+    return filing_cache.load_imported_index()
+
+
+def save_imported_analysis(obj: dict) -> tuple:
+    """Validate + persist one imported analysis. Returns (ok, message)."""
+    return filing_cache.save_imported(obj)
+
+
+def normalize_accession(accn) -> str:
+    return filing_cache.normalize_accession(accn)
 
 
 def analyze_filing(accession_number: str, model: str, cik: int,

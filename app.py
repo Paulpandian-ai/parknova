@@ -43,6 +43,15 @@ def sidebar_filters(df: pd.DataFrame) -> pd.DataFrame:
             service.clear_live_caches()
             st.success("Live caches cleared.")
             st.rerun()
+        # Filing analysis defaults to the zero-cost import path; the paid
+        # Anthropic API is an explicit, off-by-default fallback (Change 4).
+        if anth.has_anthropic_key():
+            st.toggle("Enable paid API analysis (fallback)", value=False,
+                      key="paid_api_fallback",
+                      help="Off by default. The primary path is importing JSON "
+                           "from the sec-filing-analyzer skill (free on your "
+                           "Claude Max plan). Turn on to also allow the paid "
+                           "Anthropic API 'Analyze' buttons.")
         st.caption("Fundamentals & trailing returns: Morningstar (static). "
                    "Today/1W/1M/3M/6M + news: FMP live (quotes cached 15m, "
                    "news 30m).")
@@ -526,12 +535,8 @@ def _ai_summary_card(ticker, name, news, filings, glance, holders):
 
 
 # ---------------------------------------------------------------------------
-# SEC Filings panel with on-demand, disk-cached LLM analysis
+# SEC Filings panel — import-first (zero cost), paid API as optional fallback
 # ---------------------------------------------------------------------------
-_MATERIAL_FORMS = {"8-K", "8-K/A", "10-Q", "10-Q/A", "10-K", "10-K/A", "6-K",
-                   "20-F", "S-1"}
-
-
 def _run_filing_analysis(ticker: str, f: dict, model: str) -> dict:
     """Fetch -> trim -> analyze one filing (uses disk cache; spinner on miss)."""
     accn = f.get("accessionNumber", "")
@@ -546,65 +551,118 @@ def _run_filing_analysis(ticker: str, f: dict, model: str) -> dict:
             f.get("form", ""), f.get("filingDate", ""), ticker)
 
 
+def _filing_reference(ticker: str, f: dict) -> str:
+    """The copyable reference string the user pastes into Claude + the skill."""
+    return (f"{ticker} {f.get('form', '?')} filed {f.get('filingDate', '?')} — "
+            f"{f.get('url', '')} (accession {f.get('accessionNumber', '')})")
+
+
+def _handle_import_uploader(uploaded) -> None:
+    """Validate + persist uploaded skill JSON file(s); report results."""
+    import json
+    ok_n, bad = 0, []
+    for uf in uploaded:
+        try:
+            obj = json.loads(uf.getvalue().decode("utf-8"))
+        except (ValueError, UnicodeDecodeError) as exc:
+            bad.append(f"{uf.name}: not valid JSON ({exc})")
+            continue
+        # A file may contain one analysis object or a list of them.
+        objs = obj if isinstance(obj, list) else [obj]
+        for o in objs:
+            good, msg = service.save_imported_analysis(o)
+            if good:
+                ok_n += 1
+            else:
+                bad.append(f"{uf.name}: {msg}")
+    if ok_n:
+        st.success(f"Imported {ok_n} analysis(es).")
+    for b in bad:
+        st.warning(f"Skipped — {b}")
+    if ok_n:
+        st.rerun()
+
+
 def _sec_filings_panel(ticker: str, filings: list):
+    st.caption("Analyze filings **free under your Claude Max plan**: copy a "
+               "filing reference → run the `sec-filing-analyzer` skill in Claude "
+               "→ import the JSON here.")
+
+    # Uploader (accepts one or many skill-produced JSON files).
+    uploaded = st.file_uploader(
+        "⬆ Import filing analysis (JSON)", type=["json"],
+        accept_multiple_files=True, key=f"import_{ticker}",
+        help="Drop the JSON produced by the sec-filing-analyzer skill. Files are "
+             "saved to .cache/filings/imported/ and matched by accession number.")
+    if uploaded:
+        _handle_import_uploader(uploaded)
+
     if not filings:
-        cp.filings_feed(filings, limit=20)  # shows the graceful empty message
+        cp.filings_feed(filings, limit=20)  # graceful empty message
         return
 
-    # No Anthropic key -> metadata list still works; hide analyze affordances.
-    if not anth.has_anthropic_key():
-        st.info("Set ANTHROPIC_API_KEY to enable on-demand filing analysis. "
-                "(The filing list below still works without it.)")
-        cp.filings_feed(filings, limit=20)
-        return
+    # Imported analyses (primary path) indexed by normalized accession.
+    imported = service.get_imported_analyses()
 
-    model = anth.MODEL_CHOICES[st.selectbox(
-        "Analysis model", list(anth.MODEL_CHOICES.keys()), index=0,
-        key="filing_model",
-        help="Haiku is cheapest/fastest. Sonnet gives a deeper read on "
-             "important filings.")]
-    st.caption("Runs a **paid AI analysis** on a filing (cached to disk after "
-               "the first run — never re-charged).")
+    # Paid API path is demoted: only when a key is present AND the sidebar
+    # fallback toggle is on.
+    paid_enabled = (anth.has_anthropic_key()
+                    and st.session_state.get("paid_api_fallback", False))
+    model = None
+    if paid_enabled:
+        model = anth.MODEL_CHOICES[st.selectbox(
+            "Analysis model (paid fallback)", list(anth.MODEL_CHOICES.keys()),
+            index=0, key="filing_model",
+            help="Haiku is cheapest/fastest. Sonnet gives a deeper read.")]
 
-    # State: which analyses to show this run (accession -> result).
     show: dict = st.session_state.setdefault("_filing_show", {})
 
-    col_a, col_b = st.columns(2)
-    with col_a:
-        latest = next((f for f in filings
-                       if f.get("form") in _MATERIAL_FORMS), None)
-        disabled = latest is None
-        if st.button("✨ Analyze latest filing", width="stretch",
-                     disabled=disabled, key="analyze_latest"):
-            res = _run_filing_analysis(ticker, latest, model)
-            show[latest.get("accessionNumber", "")] = res
-    with col_b:
-        if st.button("🧵 Analyze recent filing activity", width="stretch",
+    # Optional paid multi-filing synthesis (only under the fallback toggle).
+    if paid_enabled:
+        if st.button("🧵 Analyze recent filing activity (paid API)",
                      key="analyze_activity"):
             _run_activity_synthesis(ticker, filings[:5], model)
-
-    # Multi-filing synthesis result (if produced this session).
-    syn = st.session_state.get("_filing_activity")
-    if syn:
-        st.markdown('<div class="section-title">Recent filing activity</div>',
-                    unsafe_allow_html=True)
-        cp.filing_analysis_result(syn)
+        syn = st.session_state.get("_filing_activity")
+        if syn:
+            with st.container(border=True):
+                st.markdown('<div class="section-title">Recent filing activity'
+                            '</div>', unsafe_allow_html=True)
+                cp.filing_analysis_result(syn)
 
     st.write("")
-    # Per-filing rows, each with its own Analyze button.
     for f in filings[:20]:
         accn = f.get("accessionNumber", "")
-        on_disk = service.filing_analysis_cached(accn, model) is not None
-        cp.filing_row_header(f.get("form", "?"), f.get("filingDate", ""),
-                             f.get("url", "#"), cached=on_disk)
-        btn_label = "View cached analysis" if on_disk else "Analyze"
+        accn_key = service.normalize_accession(accn)
+        imported_obj = imported.get(accn_key)
         has_doc = bool(f.get("primaryDocument"))
-        if st.button(btn_label, key=f"an_{accn}", disabled=not has_doc):
-            show[accn] = _run_filing_analysis(ticker, f, model)
-        if not has_doc:
-            st.caption("No primary document to analyze for this filing.")
-        if accn in show:
-            cp.filing_analysis_result(show[accn])
+
+        with st.container(border=True):
+            cp.filing_row_header(
+                f.get("form", "?"), f.get("filingDate", ""), f.get("url", "#"),
+                cached=(imported_obj is None
+                        and paid_enabled
+                        and service.filing_analysis_cached(accn, model) is not None))
+
+            # Accession + copyable EDGAR reference (Change 3).
+            st.code(_filing_reference(ticker, f), language=None)
+
+            if imported_obj is not None:
+                # Imported analysis wins — no API path offered.
+                cp.imported_analysis_result(imported_obj)
+                st.caption("Imported from Claude. Re-import an updated JSON to "
+                           "replace this.")
+            elif paid_enabled:
+                on_disk = service.filing_analysis_cached(accn, model) is not None
+                label = "View cached analysis" if on_disk else "Analyze (paid API)"
+                if st.button(label, key=f"an_{accn_key}", disabled=not has_doc):
+                    show[accn] = _run_filing_analysis(ticker, f, model)
+                if not has_doc:
+                    st.caption("No primary document to analyze for this filing.")
+                if accn in show:
+                    cp.filing_analysis_result(show[accn])
+            else:
+                st.caption("No imported analysis yet — copy the reference above "
+                           "and run the skill in Claude.")
 
 
 def _run_activity_synthesis(ticker: str, filings: list, model: str):

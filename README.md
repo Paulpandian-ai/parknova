@@ -11,7 +11,8 @@ curated universe of ~226 AI-related stocks.
 | **`bucket_mapping.csv`** | Static taxonomy | Curated **Primary Bucket** per ticker (the 10 AI sub-themes) + secondary bucket weights. Left-joined on `Ticker`. |
 | **Financial Modeling Prep (FMP)** | Live, secondary | Short-window momentum (Today/1W/1M/3M/6M from daily adjusted-close), news, and (if your plan includes them) institutional 13F + insider Form-4 data. |
 | **SEC EDGAR** | Live, authoritative | Recent SEC filings (10-K/Q, 8-K, S-1/424B, SC 13D/G). Free; requires a descriptive User-Agent. |
-| **Anthropic API** *(optional)* | Opt-in | An AI narrative summary on the News & Filings view, plus **on-demand, per-filing AI analysis** — only when `ANTHROPIC_API_KEY` is set; never auto-run. |
+| **Claude Max plan** via the `sec-filing-analyzer` skill | Primary (filing analysis) | You analyze a filing inside Claude and **import the JSON** — zero marginal cost. This is the default filing-analysis path. |
+| **Anthropic API** *(optional fallback)* | Opt-in, off by default | The News & Filings narrative summary, plus a paid per-filing "Analyze" path — only when `ANTHROPIC_API_KEY` is set **and** the sidebar fallback toggle is on; never auto-run. |
 
 Fundamentals are never fetched from an API; live prices/returns for the short
 windows are never read from the spreadsheet.
@@ -49,17 +50,25 @@ filter and grouping dimension across the app, rendered as colored chips.
   institutional changes, implied upside), an optional AI summary, then tabs for
   News (with a "leading sources only" toggle), SEC Filings (badged), Institutional
   holders, and Insider transactions.
-- **On-demand filing analysis** (SEC Filings tab) — each filing has an "Analyze"
-  button plus an "Analyze latest filing" shortcut and an "Analyze recent filing
-  activity" synthesis. On click only, the app fetches the real document from
-  EDGAR's archives, converts HTML → clean text, trims it for cost (full text for
-  8-K/6-K/13D-G; MD&A + Risk Factors + Results-of-Operations section-extraction
-  for 10-K/10-Q, with a first-40k-char fallback and a hard 60k-char cap), and
-  sends it to Anthropic for a structured summary (what/why · material facts ·
-  risks · net read). Results are **cached to disk by accession number + model**,
-  so a filing is analyzed at most once ever (survives restarts) and re-opening
-  shows it instantly with a "cached" tag and no API call. Model is selectable
-  (Haiku default for cost; Sonnet for a deeper read). Nothing runs on page load.
+- **Filing analysis — import-first, zero cost** (SEC Filings tab). The primary
+  path uses your **Claude Max plan**, not the paid API: each filing shows its
+  accession + a copyable EDGAR doc URL + a one-line "filing reference". You copy
+  that into Claude, run the `sec-filing-analyzer` skill to get a JSON object back,
+  and **import it** (drag onto the uploader, or drop the file into
+  `.cache/filings/imported/`). The app indexes imports by accession (dashes
+  ignored) and renders the structured result inline under the matching filing —
+  what/why, material facts, a key-figures table, guidance changes, risks/flags, a
+  sentiment chip and net read — tagged **"Imported · analyzed in Claude"**, with
+  no API call. Imports survive restarts (they're files on disk) and take
+  precedence over everything.
+  - *Optional paid fallback:* with `ANTHROPIC_API_KEY` set **and** the sidebar
+    "Enable paid API analysis (fallback)" toggle on (off by default), filings
+    without an import get an "Analyze (paid API)" button. On click only, the app
+    fetches the document from EDGAR, converts HTML → clean text, trims for cost
+    (full text for 8-K/6-K/13D-G; MD&A + Risk Factors + Results section-extraction
+    for 10-K/10-Q, first-40k fallback, hard 60k cap), and calls Anthropic
+    (Haiku default; Sonnet selectable). These results are disk-cached by
+    accession + model. Nothing ever runs on page load.
 - **Stock Detail** — header with bucket chip, rating ★, moat chip and fair-value
   upside; live Plotly price chart with a window selector; the 9 return windows as
   stat cards; a factor radar vs the universe median; grouped fundamentals; and a
