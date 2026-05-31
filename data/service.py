@@ -9,6 +9,7 @@ The FMP client (holds a requests session, not hashable) lives in cache_resource.
 from __future__ import annotations
 
 import datetime as _dt
+import logging
 from typing import Dict, List, Optional
 
 import pandas as pd
@@ -18,6 +19,8 @@ from core import filing_cache
 from data.edgar_client import EDGARClient
 from data.finnhub_client import FinnhubClient, has_finnhub_key
 from data.fmp_client import FMPClient, FMPError
+
+logger = logging.getLogger("parknova.service")
 
 QUOTE_TTL = 15           # near-real-time, but don't hammer
 HISTORY_TTL = 900        # 15 min
@@ -59,12 +62,29 @@ def has_finnhub() -> bool:
 # carries the source + any failure reason so the UI is never silently empty.
 # ---------------------------------------------------------------------------
 def _rows_to_series(rows: list, ticker: str) -> pd.Series:
+    """Build a price Series from stable/legacy history rows.
+
+    Defensive about the price field name (stable EOD may use ``adjClose``,
+    ``close``, or the light endpoint's ``price``); logs which one was used so a
+    live shape mismatch is easy to spot.
+    """
+    from data.fmp_client import pick_price_field
+    if not rows:
+        return pd.Series(dtype="float64", name=ticker)
     df = pd.DataFrame(rows)
     if "date" not in df.columns:
+        logger.warning("FMP history for %s has no 'date' column; keys=%s",
+                       ticker, list(df.columns)[:8])
         return pd.Series(dtype="float64", name=ticker)
-    price_col = "adjClose" if "adjClose" in df.columns else "close"
+    price_col = pick_price_field(rows[0])
+    if price_col is None or price_col not in df.columns:
+        logger.warning("FMP history for %s: no known price field in %s",
+                       ticker, list(df.columns)[:8])
+        return pd.Series(dtype="float64", name=ticker)
+    logger.info("FMP history for %s: using price field '%s'", ticker, price_col)
     df["date"] = pd.to_datetime(df["date"])
-    s = df.set_index("date")[price_col].astype("float64").sort_index().dropna()
+    s = (df.set_index("date")[price_col].astype("float64")
+         .sort_index().dropna())
     s.name = ticker
     return s
 
@@ -322,24 +342,13 @@ def clear_live_caches() -> None:
 def run_diagnostics(ticker: str = "NVDA") -> List[dict]:
     """Return a list of per-endpoint diagnostic rows for the Settings panel."""
     import datetime as dt
-    from data import fmp_client as fmpc
 
     rows: List[dict] = []
 
-    # --- FMP endpoints ---
+    # --- FMP stable endpoints (probe the EXACT paths the client calls) ---
     try:
         client = get_client()
-        today = dt.date.today()
-        frm = today - dt.timedelta(days=30)
-        checks = [
-            ("FMP historical-price-full",
-             f"{fmpc.BASE_V3}/historical-price-full/{ticker}",
-             {"from": frm.isoformat(), "to": today.isoformat()}),
-            ("FMP quote", f"{fmpc.BASE_V3}/quote/{ticker}", {}),
-            ("FMP stock_news", f"{fmpc.BASE_V3}/stock_news",
-             {"tickers": ticker, "limit": 1}),
-        ]
-        for name, url, params in checks:
+        for name, url, params in client.diagnostic_targets(ticker):
             p = client.probe(url, params)
             rows.append({"endpoint": name, **p})
     except FMPError:
