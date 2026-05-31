@@ -8,6 +8,7 @@ The FMP client (holds a requests session, not hashable) lives in cache_resource.
 
 from __future__ import annotations
 
+import datetime as _dt
 from typing import Dict, List, Optional
 
 import pandas as pd
@@ -15,9 +16,12 @@ import streamlit as st
 
 from core import filing_cache
 from data.edgar_client import EDGARClient
+from data.finnhub_client import FinnhubClient, has_finnhub_key
 from data.fmp_client import FMPClient, FMPError
 
-MOMENTUM_TTL = 900       # 15 min
+QUOTE_TTL = 15           # near-real-time, but don't hammer
+HISTORY_TTL = 900        # 15 min
+MOMENTUM_TTL = 900       # back-compat alias
 NEWS_TTL = 1800          # 30 min
 DISCLOSURE_TTL = 86_400  # 1 day (institutional / insider)
 EDGAR_TTL = 86_400       # 1 day
@@ -26,6 +30,11 @@ EDGAR_TTL = 86_400       # 1 day
 @st.cache_resource
 def get_client() -> FMPClient:
     return FMPClient()
+
+
+@st.cache_resource
+def get_finnhub_client() -> FinnhubClient:
+    return FinnhubClient()
 
 
 @st.cache_resource
@@ -41,12 +50,15 @@ def has_api_key() -> bool:
         return False
 
 
-@st.cache_data(ttl=MOMENTUM_TTL, show_spinner=False)
-def get_history(ticker: str) -> pd.Series:
-    """Adjusted-close Series (ascending date index). Empty when no data."""
-    rows = get_client().historical(ticker)
-    if not rows:
-        return pd.Series(dtype="float64", name=ticker)
+def has_finnhub() -> bool:
+    return has_finnhub_key()
+
+
+# ---------------------------------------------------------------------------
+# History: prefer FMP historical; fall back to Finnhub candles. The result
+# carries the source + any failure reason so the UI is never silently empty.
+# ---------------------------------------------------------------------------
+def _rows_to_series(rows: list, ticker: str) -> pd.Series:
     df = pd.DataFrame(rows)
     if "date" not in df.columns:
         return pd.Series(dtype="float64", name=ticker)
@@ -57,9 +69,90 @@ def get_history(ticker: str) -> pd.Series:
     return s
 
 
+@st.cache_data(ttl=HISTORY_TTL, show_spinner=False)
+def get_history_result(ticker: str) -> dict:
+    """Return ``{series, source, error}`` for a ticker's daily history.
+
+    Precedence: FMP historical -> Finnhub candles -> empty (with reason).
+    """
+    fmp_err = None
+    try:
+        res = get_client().historical_result(ticker)
+        rows, fmp_err = res["rows"], res.get("error")
+        if rows:
+            s = _rows_to_series(rows, ticker)
+            if not s.empty:
+                return {"series": s, "source": "FMP", "error": None}
+    except FMPError:
+        fmp_err = "FMP_API_KEY not set"
+
+    # Fall back to Finnhub candles (last ~6 years of daily closes).
+    if has_finnhub_key():
+        to_u = int(_dt.datetime.now(_dt.timezone.utc).timestamp())
+        from_u = to_u - int(6 * 365.25 * 86400)
+        c = get_finnhub_client().candles(ticker, from_u, to_u)
+        if c["closes"]:
+            idx = pd.to_datetime(pd.Series(c["timestamps"]), unit="s")
+            s = pd.Series(c["closes"], index=idx, dtype="float64",
+                          name=ticker).sort_index().dropna()
+            reason = (f"FMP: {fmp_err}" if fmp_err else
+                      "FMP historical unavailable")
+            return {"series": s, "source": "Finnhub", "error": reason}
+        finn_err = c["error"]
+        reason = "; ".join(x for x in [f"FMP: {fmp_err}" if fmp_err else None,
+                                       f"Finnhub: {finn_err}"] if x)
+        return {"series": pd.Series(dtype="float64", name=ticker),
+                "source": None, "error": reason}
+
+    reason = (f"FMP historical not available ({fmp_err})" if fmp_err else
+              "FMP returned no history; set FINNHUB_API_KEY to enable fallback")
+    return {"series": pd.Series(dtype="float64", name=ticker),
+            "source": None, "error": reason}
+
+
+@st.cache_data(ttl=HISTORY_TTL, show_spinner=False)
+def get_history(ticker: str) -> pd.Series:
+    """Adjusted-close Series (ascending date index). Empty when no data.
+
+    Back-compat shim over :func:`get_history_result` (drops source/reason).
+    """
+    return get_history_result(ticker)["series"]
+
+
 @st.cache_data(ttl=MOMENTUM_TTL, show_spinner=False)
 def get_quotes_batch(tickers: tuple) -> Dict[str, dict]:
     return get_client().quotes_batch(list(tickers))
+
+
+# ---------------------------------------------------------------------------
+# Single near-real-time quote: prefer Finnhub -> fall back to FMP -> reason.
+# ttl=15s keeps it fresh without hammering the free tier.
+# ---------------------------------------------------------------------------
+@st.cache_data(ttl=QUOTE_TTL, show_spinner=False)
+def get_live_quote(ticker: str) -> dict:
+    """Return ``{price, pct, source, ts, error}`` for one ticker.
+
+    Finnhub (near-real-time) first, then FMP quote, else a reason.
+    """
+    if has_finnhub_key():
+        q = get_finnhub_client().quote(ticker)
+        if q["price"] is not None:
+            return {"price": q["price"], "pct": q["pct"], "source": "Finnhub",
+                    "ts": q["ts"], "error": None}
+        finn_err = q["error"]
+    else:
+        finn_err = "no FINNHUB_API_KEY"
+
+    # Fall back to FMP batch quote (single symbol).
+    try:
+        fq = get_client().quotes_batch([ticker]).get(ticker) or {}
+    except FMPError:
+        fq = {}
+    if fq.get("price") is not None:
+        return {"price": fq.get("price"), "pct": fq.get("changesPercentage"),
+                "source": "FMP", "ts": None, "error": None}
+    return {"price": None, "pct": None, "source": None, "ts": None,
+            "error": f"Finnhub: {finn_err}; FMP quote also empty"}
 
 
 @st.cache_data(ttl=NEWS_TTL, show_spinner=False)
@@ -212,9 +305,67 @@ def clear_live_caches() -> None:
     a filing's content never changes, so its analysis is valid forever.
     """
     get_history.clear()
+    get_history_result.clear()
     get_quotes_batch.clear()
+    get_live_quote.clear()
     get_stock_news.clear()
     get_general_news.clear()
     get_institutional_holders.clear()
     get_insider_trades.clear()
     get_sec_filings.clear()
+
+
+# ---------------------------------------------------------------------------
+# Data diagnostics — probe each live endpoint for a test ticker and report the
+# real reason a call fails (bad key / plan-gated / rate-limited / wrong shape).
+# ---------------------------------------------------------------------------
+def run_diagnostics(ticker: str = "NVDA") -> List[dict]:
+    """Return a list of per-endpoint diagnostic rows for the Settings panel."""
+    import datetime as dt
+    from data import fmp_client as fmpc
+
+    rows: List[dict] = []
+
+    # --- FMP endpoints ---
+    try:
+        client = get_client()
+        today = dt.date.today()
+        frm = today - dt.timedelta(days=30)
+        checks = [
+            ("FMP historical-price-full",
+             f"{fmpc.BASE_V3}/historical-price-full/{ticker}",
+             {"from": frm.isoformat(), "to": today.isoformat()}),
+            ("FMP quote", f"{fmpc.BASE_V3}/quote/{ticker}", {}),
+            ("FMP stock_news", f"{fmpc.BASE_V3}/stock_news",
+             {"tickers": ticker, "limit": 1}),
+        ]
+        for name, url, params in checks:
+            p = client.probe(url, params)
+            rows.append({"endpoint": name, **p})
+    except FMPError:
+        rows.append({"endpoint": "FMP", "ok": False, "status": None,
+                     "error": "FMP_API_KEY not set", "empty": False,
+                     "kind": None, "keys": None, "sample": None})
+
+    # --- Finnhub endpoints ---
+    if has_finnhub_key():
+        fc = get_finnhub_client()
+        q = fc.quote(ticker)
+        rows.append({"endpoint": "Finnhub quote",
+                     "ok": q["price"] is not None, "status": None,
+                     "error": q["error"], "empty": q["price"] is None,
+                     "kind": "dict",
+                     "keys": ["c", "dp", "pc", "t"],
+                     "sample": {"price": q["price"], "pct": q["pct"]}})
+        to_u = int(dt.datetime.now(dt.timezone.utc).timestamp())
+        cdl = fc.candles(ticker, to_u - 30 * 86400, to_u)
+        rows.append({"endpoint": "Finnhub candles (D)",
+                     "ok": bool(cdl["closes"]), "status": None,
+                     "error": cdl["error"], "empty": not cdl["closes"],
+                     "kind": "dict", "keys": ["c", "t", "s"],
+                     "sample": {"n_closes": len(cdl["closes"])}})
+    else:
+        rows.append({"endpoint": "Finnhub", "ok": False, "status": None,
+                     "error": "FINNHUB_API_KEY not set", "empty": False,
+                     "kind": None, "keys": None, "sample": None})
+    return rows

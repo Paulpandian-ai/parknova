@@ -1,4 +1,4 @@
-streamlit>=1.40
+streamlit>=1.40  # >=1.37 needed for st.fragment(run_every=...)
 pandas>=2.0
 numpy>=1.26
 openpyxl>=3.1

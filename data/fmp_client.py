@@ -24,6 +24,20 @@ BASE_V4 = "https://financialmodelingprep.com/api/v4"
 DEFAULT_TIMEOUT = 15
 
 
+def fmp_error_text(data: Any) -> Optional[str]:
+    """Return FMP's error/usage message if ``data`` is an error object.
+
+    FMP returns HTTP 200 with a JSON object like ``{"Error Message": "..."}``
+    (or an "Exclusive Endpoint"/usage notice) when a key is invalid, an endpoint
+    is plan-gated, or a limit is hit. Detect those so the reason is never lost.
+    """
+    if isinstance(data, dict):
+        for k in ("Error Message", "error", "message", "Information"):
+            if k in data and isinstance(data[k], str):
+                return data[k]
+    return None
+
+
 class FMPError(RuntimeError):
     """Raised when the API key is missing."""
 
@@ -40,11 +54,14 @@ class FMPClient:
         self.session.headers.update({"User-Agent": "ParkNova/1.0"})
 
     # ------------------------------------------------------------------
-    def _get(self, url: str, params: Optional[Dict[str, Any]] = None) -> Any:
+    def _get(self, url: str, params: Optional[Dict[str, Any]] = None,
+             return_errors: bool = False) -> Any:
         """GET returning parsed JSON, or None on any failure.
 
         Handles timeouts/HTTP errors/empty bodies and retries once on 429 with
-        back-off.
+        back-off. When ``return_errors`` is True, an FMP error/usage object
+        (HTTP 200 with ``{"Error Message": ...}``) is returned as-is so callers
+        can surface the reason instead of getting a silent None.
         """
         params = dict(params or {})
         params["apikey"] = self.api_key
@@ -69,10 +86,56 @@ class FMPClient:
                 data = resp.json()
             except ValueError:
                 return None
+            if return_errors and fmp_error_text(data):
+                return data
             if data in ({}, []):
                 return None
             return data
         return None
+
+    def probe(self, url: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Diagnostics: GET ``url`` and report status, error text, and shape.
+
+        Returns ``{ok, status, error, empty, kind, keys, sample}`` without
+        raising — used by the Settings → Data diagnostics panel so the real
+        reason a call fails (bad key / plan-gated / rate-limited / wrong shape)
+        is visible verbatim.
+        """
+        params = dict(params or {})
+        params["apikey"] = self.api_key
+        out: Dict[str, Any] = {"ok": False, "status": None, "error": None,
+                               "empty": False, "kind": None, "keys": None,
+                               "sample": None}
+        try:
+            resp = self.session.get(url, params=params, timeout=self.timeout)
+        except requests.RequestException as exc:
+            out["error"] = f"request failed: {exc}"
+            return out
+        out["status"] = resp.status_code
+        if resp.status_code == 429:
+            out["error"] = "rate-limited (HTTP 429)"
+            return out
+        try:
+            data = resp.json()
+        except ValueError:
+            out["error"] = f"non-JSON body: {resp.text[:160]}"
+            return out
+        err = fmp_error_text(data)
+        if err:
+            out["error"] = err  # verbatim plan-gated / bad-key / usage message
+            return out
+        if data in ({}, [], None):
+            out["empty"] = True
+            return out
+        out["kind"] = type(data).__name__
+        if isinstance(data, dict):
+            out["keys"] = list(data.keys())[:10]
+            out["sample"] = {k: data[k] for k in list(data.keys())[:3]}
+        elif isinstance(data, list):
+            out["keys"] = list(data[0].keys())[:10] if isinstance(data[0], dict) else None
+            out["sample"] = data[0] if data else None
+        out["ok"] = True
+        return out
 
     # ------------------------------------------------------------------
     # Daily history (one fetch per ticker; momentum windows sliced locally)
@@ -81,15 +144,34 @@ class FMPClient:
         self, ticker: str, from_date: Optional[str] = None,
         to_date: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
+        """Return the historical rows, or [] (errors are swallowed here).
+
+        Prefer :meth:`historical_result` when you need the failure reason.
+        """
+        return self.historical_result(ticker, from_date, to_date)["rows"]
+
+    def historical_result(
+        self, ticker: str, from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Return ``{rows, error}``: parsed history rows + any FMP error text.
+
+        ``error`` is set (and ``rows`` empty) when FMP returns a plan-gated /
+        bad-key / usage object so callers can fall back to Finnhub and show why.
+        """
         params: Dict[str, Any] = {}
         if from_date:
             params["from"] = from_date
         if to_date:
             params["to"] = to_date
-        data = self._get(f"{BASE_V3}/historical-price-full/{ticker}", params)
+        data = self._get(f"{BASE_V3}/historical-price-full/{ticker}", params,
+                         return_errors=True)
+        err = fmp_error_text(data)
+        if err:
+            return {"rows": [], "error": err}
         if isinstance(data, dict):
-            return data.get("historical", []) or []
-        return []
+            return {"rows": data.get("historical", []) or [], "error": None}
+        return {"rows": [], "error": None}
 
     # ------------------------------------------------------------------
     # Quotes (for "Today" change + intraday last price)

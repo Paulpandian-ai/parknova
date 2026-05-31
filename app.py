@@ -83,12 +83,19 @@ def filter_toolbar(df: pd.DataFrame, *, bucket=True, sector=True, style=True):
 
 
 def settings_popover() -> None:
-    """Top-right Settings popover: refresh + paid-API toggle + data note."""
+    """Top-right Settings popover: refresh, live-interval, diagnostics, toggles."""
     with st.popover("Settings", use_container_width=True):
         if st.button("Refresh live data", width="stretch"):
             service.clear_live_caches()
             st.success("Live caches cleared.")
             st.rerun()
+
+        # Live-quote refresh interval (drives the @st.fragment polling).
+        st.selectbox("Live quote refresh", ["Off", "15s", "30s", "60s"],
+                     index=1, key="live_interval",
+                     help="How often the selected ticker's quote polls Finnhub. "
+                          "'Off' keeps quotes static to conserve API calls.")
+
         if anth.has_anthropic_key():
             st.toggle("Enable paid API analysis (fallback)", value=False,
                       key="paid_api_fallback",
@@ -96,10 +103,139 @@ def settings_popover() -> None:
                            "from the sec-filing-analyzer skill (free on your "
                            "Claude Max plan). Turn on to also allow the paid "
                            "Anthropic API 'Analyze' buttons.")
+
+        with st.expander("Data diagnostics"):
+            st.caption("Probe each live endpoint for a test ticker and show the "
+                       "real reason a call fails.")
+            test_t = st.text_input("Test ticker", value="NVDA",
+                                   key="diag_ticker").strip().upper() or "NVDA"
+            if st.button("Run diagnostics", width="stretch", key="run_diag"):
+                st.session_state["_diag_rows"] = service.run_diagnostics(test_t)
+            for r in st.session_state.get("_diag_rows", []):
+                _render_diag_row(r)
+
+        src = []
+        src.append("Finnhub" if service.has_finnhub() else "Finnhub (no key)")
+        src.append("FMP" if service.has_api_key() else "FMP (no key)")
         st.markdown(
             '<div class="muted-note">Fundamentals &amp; trailing returns: '
-            'Morningstar (static). Today/1W/1M/3M/6M + news: FMP live '
-            '(quotes cached 15m, news 30m).</div>', unsafe_allow_html=True)
+            'Morningstar (static). Quote: ' + " → ".join(src) +
+            ' (15s cache). History: FMP → Finnhub candles (15m cache).'
+            '</div>', unsafe_allow_html=True)
+
+
+def _render_diag_row(r: dict) -> None:
+    """One diagnostics line: green ok / red reason, verbatim error text."""
+    ok = r.get("ok")
+    if ok:
+        detail = f"keys={r.get('keys')}" if r.get("keys") else "ok"
+        body = f'<span style="color:{styles.POSITIVE};">OK</span> · {detail}'
+    elif r.get("empty"):
+        body = f'<span style="color:{styles.MUTED};">empty response</span>'
+    else:
+        reason = r.get("error") or f"status {r.get('status')}"
+        body = (f'<span style="color:{styles.NEGATIVE};">FAIL</span> · '
+                f'{cp._esc(reason)}')
+    status = f" (HTTP {r['status']})" if r.get("status") else ""
+    st.markdown(
+        f'<div class="muted-note" style="margin:2px 0;"><b>{r["endpoint"]}</b>'
+        f'{status}: {body}</div>', unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
+# Live quote (near-real-time) — refreshes in place via st.fragment
+# ---------------------------------------------------------------------------
+_INTERVAL_SECS = {"Off": None, "15s": 15, "30s": 30, "60s": 60}
+
+
+def _live_interval():
+    """Seconds for the fragment poll, or None when polling is Off."""
+    return _INTERVAL_SECS.get(st.session_state.get("live_interval", "15s"), 15)
+
+
+def _render_quote_inline(ticker: str, fallback_price=None) -> None:
+    """Render the live price + today's-move chip + source/timestamp line."""
+    import datetime as _dt
+    q = service.get_live_quote(ticker)
+    price, pct, source = q["price"], q["pct"], q["source"]
+    if price is None:
+        if fallback_price is not None and pd.notna(fallback_price):
+            st.markdown(
+                f'<div class="metric-card"><div class="label">Live price</div>'
+                f'<div class="value">{cp.fmt_price(fallback_price)}</div>'
+                f'<div class="sub">{cp._esc(q["error"] or "live quote unavailable")}'
+                f'</div></div>', unsafe_allow_html=True)
+        else:
+            st.markdown(
+                f'<div class="metric-card"><div class="label">Live price</div>'
+                f'<div class="value">{cp.DASH}</div><div class="sub">'
+                f'{cp._esc(q["error"] or "no quote")}</div></div>',
+                unsafe_allow_html=True)
+        return
+    cls = "" if pct is None else ("pos" if float(pct) >= 0 else "neg")
+    move = cp.DASH if pct is None else cp.fmt_pct_frac(float(pct) / 100.0)
+    now = _dt.datetime.now().strftime("%H:%M:%S")
+    st.markdown(
+        f'<div class="metric-card"><div class="label">Live price · {source}</div>'
+        f'<div class="value">{cp.fmt_price(price)} '
+        f'<span class="{cls}" style="font-size:0.9rem;">{move}</span></div>'
+        f'<div class="sub">live · updated {now}</div></div>',
+        unsafe_allow_html=True)
+
+
+def live_quote_card(ticker: str, fallback_price=None) -> None:
+    """Live quote card; polls every N seconds via a fragment unless Off."""
+    every = _live_interval()
+    if every is None:
+        _render_quote_inline(ticker, fallback_price)
+        return
+
+    @st.fragment(run_every=every)
+    def _frag():
+        _render_quote_inline(ticker, fallback_price)
+
+    _frag()
+
+
+def _render_ticker_strip(tickers: list) -> None:
+    """Compact live 'Today' strip for a small set of tickers."""
+    import datetime as _dt
+    cells = st.columns(len(tickers))
+    for col, t in zip(cells, tickers):
+        with col:
+            q = service.get_live_quote(t)
+            if q["price"] is None:
+                cp.stat_card(t, cp.DASH, cp._esc(q["error"] or "")[:24])
+            else:
+                pct = q["pct"]
+                cp.stat_card(t, cp.fmt_price(q["price"]),
+                             cp.fmt_pct_frac(float(pct) / 100.0) if pct is not None
+                             else cp.DASH,
+                             sign=pct)
+    now = _dt.datetime.now().strftime("%H:%M:%S")
+    src = "Finnhub" if service.has_finnhub() else "FMP"
+    st.markdown(f'<div class="muted-note">live · {src} · updated {now}</div>',
+                unsafe_allow_html=True)
+
+
+def live_ticker_strip(tickers: list, max_n: int = 8) -> None:
+    """Live 'Today' strip for up to ``max_n`` tickers; fragment-polls unless Off.
+
+    Only these visible tickers poll live — never all 226.
+    """
+    tickers = [t for t in tickers if t][:max_n]
+    if not tickers:
+        return
+    every = _live_interval()
+    if every is None:
+        _render_ticker_strip(tickers)
+        return
+
+    @st.fragment(run_every=every)
+    def _frag():
+        _render_ticker_strip(tickers)
+
+    _frag()
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +290,13 @@ def view_performance(full: pd.DataFrame, perf_full: pd.DataFrame):
                          cp.fmt_pct_frac(worst[sel]), sign=worst[sel])
         else:
             cp.stat_card(f"Worst ({sel})", cp.DASH)
+
+    # Live "Today" strip for the top visible names (only these poll live).
+    if service.has_finnhub() or service.has_api_key():
+        top_live = (df.sort_values(sel, ascending=False, na_position="last")
+                    ["Ticker"].head(8).tolist())
+        with st.expander("Live quotes — top names", expanded=False):
+            live_ticker_strip(top_live)
 
     st.write("")
     t_table, t_mom, t_heat = st.tabs(["Returns table", "Momentum rank",
@@ -753,7 +896,7 @@ def view_detail(full: pd.DataFrame, perf_full: pd.DataFrame,
     lp = row.get("Last Price")
     cinfo = st.columns(3)
     with cinfo[0]:
-        cp.stat_card("Last Price", cp.fmt_price(lp))
+        live_quote_card(ticker, fallback_price=lp)
     with cinfo[1]:
         cp.stat_card("Fair Value", cp.fmt_price(fv))
     with cinfo[2]:
@@ -763,13 +906,22 @@ def view_detail(full: pd.DataFrame, perf_full: pd.DataFrame,
     st.markdown('<div class="section-title">Price</div>', unsafe_allow_html=True)
     win = st.radio("Window", list(_DETAIL_WINDOWS.keys()) + ["Max"],
                    index=4, horizontal=True, key="detail_win")
-    if service.has_api_key():
-        series = service.get_history(ticker)
-        chart_s = series if (win == "Max" or series.empty) else \
-            series[series.index >= series.index[-1] - _DETAIL_WINDOWS[win]]
-        cp.price_chart(chart_s)
+    if service.has_api_key() or service.has_finnhub():
+        hist = service.get_history_result(ticker)
+        series = hist["series"]
+        if series.empty:
+            st.warning(f"No price history: {hist['error'] or 'unavailable'}")
+        else:
+            if hist["source"] and hist["error"]:
+                # Fallback succeeded — show source + why FMP was bypassed.
+                st.caption(f"Source: {hist['source']} — {hist['error']}")
+            else:
+                st.caption(f"Source: {hist['source']}")
+            chart_s = series if (win == "Max") else \
+                series[series.index >= series.index[-1] - _DETAIL_WINDOWS[win]]
+            cp.price_chart(chart_s)
     else:
-        st.info("Set FMP_API_KEY to load the live price chart.")
+        st.info("Set FMP_API_KEY or FINNHUB_API_KEY to load the price chart.")
 
     # --- Return cards (9 windows) ---
     st.markdown('<div class="section-title">Returns</div>', unsafe_allow_html=True)

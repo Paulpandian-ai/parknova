@@ -10,6 +10,7 @@ curated universe of ~226 AI-related stocks.
 | **Morningstar Excel** (`AI_Equities_Universe_Data from MorningStar.xlsx`) | Primary, static | **All** fundamentals, valuation, profitability, growth, financial health, Morningstar moat/rating/fair-value, and trailing returns (YTD/1Y/3Y/5Y). |
 | **`bucket_mapping.csv`** | Static taxonomy | Curated **Primary Bucket** per ticker (the 10 AI sub-themes) + secondary bucket weights. Left-joined on `Ticker`. |
 | **Financial Modeling Prep (FMP)** | Live, secondary | Short-window momentum (Today/1W/1M/3M/6M from daily adjusted-close), news, and (if your plan includes them) institutional 13F + insider Form-4 data. |
+| **Finnhub** (free tier) | Live quotes + history fallback | Near-real-time US quotes (price + today's %), and daily candles used as a **history fallback** when FMP's plan doesn't return `historical-price-full`. Set `FINNHUB_API_KEY` (free at [finnhub.io](https://finnhub.io)). |
 | **SEC EDGAR** | Live, authoritative | Recent SEC filings (10-K/Q, 8-K, S-1/424B, SC 13D/G). Free; requires a descriptive User-Agent. |
 | **Claude Max plan** via the `sec-filing-analyzer` skill | Primary (filing analysis) | You analyze a filing inside Claude and **import the JSON** — zero marginal cost. This is the default filing-analysis path. |
 | **Anthropic API** *(optional fallback)* | Opt-in, off by default | The News & Filings narrative summary, plus a paid per-filing "Analyze" path — only when `ANTHROPIC_API_KEY` is set **and** the Settings-popover fallback toggle is on; never auto-run. |
@@ -96,13 +97,29 @@ platform-set environment variable:
 ```bash
 cp .env.example .env
 # edit .env -> FMP_API_KEY=your_real_key
-# optional: ANTHROPIC_API_KEY=...   (enables the opt-in AI summary)
+#              FINNHUB_API_KEY=your_real_key   (free at finnhub.io; live quotes + history fallback)
+# optional:    ANTHROPIC_API_KEY=...           (enables the opt-in AI summary)
 ```
 
 > The Morningstar views (fundamentals, factors, buckets) work without any key.
-> Live momentum, news, and insider/institutional data need `FMP_API_KEY`. SEC
-> filings need no key. The AI summary appears only when `ANTHROPIC_API_KEY` is
-> set and the toggle is on.
+> Live momentum, news, and insider/institutional data need `FMP_API_KEY`.
+> `FINNHUB_API_KEY` adds near-real-time quotes and a daily-candle history fallback
+> (useful when FMP's plan doesn't include `historical-price-full`). SEC filings
+> need no key. The AI summary appears only when `ANTHROPIC_API_KEY` is set.
+
+### Live data: quotes, history, diagnostics
+
+- **Quote precedence** (price + today's %): Finnhub (near-real-time) → FMP quote → "—".
+- **History precedence** (chart + 1W/1M/3M/6M windows): FMP `historical-price-full`
+  → Finnhub daily candles → "—" with the reason shown. Each ticker's history is
+  fetched once and all windows are sliced from it.
+- **Near-real-time refresh:** Stock Detail's quote and a Performance "Live quotes"
+  strip poll via `st.fragment(run_every=...)`; the interval (Off / 15s / 30s /
+  60s) is set in **Settings**. Only the selected/visible tickers poll — never all
+  226. Quotes are cached 15s, history 15m.
+- **Settings → Data diagnostics** probes each live endpoint for a test ticker and
+  shows the real reason a call fails — including FMP's verbatim plan-gated /
+  bad-key / usage message (returned as HTTP 200 JSON, not an HTTP error).
 
 ### SEC EDGAR User-Agent
 
