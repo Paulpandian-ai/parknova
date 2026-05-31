@@ -143,7 +143,7 @@ def return_bg(frac, full_scale: float = 0.5) -> str:
     if _missing(frac):
         return ""
     frac = float(frac)
-    alpha = min(abs(frac) / full_scale, 1.0) * 0.55
+    alpha = min(abs(frac) / full_scale, 1.0) * 0.35
     if frac >= 0:
         return f"background-color: rgba(22,163,74,{alpha:.3f}); color:{styles.TEXT};"
     return f"background-color: rgba(220,38,38,{alpha:.3f}); color:{styles.TEXT};"
@@ -171,7 +171,7 @@ def zscore_bg(val, scale: float = 1.5) -> str:
     if _missing(val):
         return ""
     v = float(val)
-    alpha = min(abs(v) / scale, 1.0) * 0.55
+    alpha = min(abs(v) / scale, 1.0) * 0.35
     if v >= 0:
         return f"background-color: rgba(22,163,74,{alpha:.3f}); color:{styles.TEXT};"
     return f"background-color: rgba(220,38,38,{alpha:.3f}); color:{styles.TEXT};"
@@ -183,9 +183,9 @@ def score_bg(val) -> str:
         return ""
     v = max(0.0, min(100.0, float(val))) / 100.0
     if v >= 0.5:
-        alpha = (v - 0.5) * 2 * 0.55
+        alpha = (v - 0.5) * 2 * 0.35
         return f"background-color: rgba(22,163,74,{alpha:.3f}); color:{styles.TEXT};"
-    alpha = (0.5 - v) * 2 * 0.55
+    alpha = (0.5 - v) * 2 * 0.35
     return f"background-color: rgba(220,38,38,{alpha:.3f}); color:{styles.TEXT};"
 
 

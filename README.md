@@ -12,7 +12,7 @@ curated universe of ~226 AI-related stocks.
 | **Financial Modeling Prep (FMP)** | Live, secondary | Short-window momentum (Today/1W/1M/3M/6M from daily adjusted-close), news, and (if your plan includes them) institutional 13F + insider Form-4 data. |
 | **SEC EDGAR** | Live, authoritative | Recent SEC filings (10-K/Q, 8-K, S-1/424B, SC 13D/G). Free; requires a descriptive User-Agent. |
 | **Claude Max plan** via the `sec-filing-analyzer` skill | Primary (filing analysis) | You analyze a filing inside Claude and **import the JSON** — zero marginal cost. This is the default filing-analysis path. |
-| **Anthropic API** *(optional fallback)* | Opt-in, off by default | The News & Filings narrative summary, plus a paid per-filing "Analyze" path — only when `ANTHROPIC_API_KEY` is set **and** the sidebar fallback toggle is on; never auto-run. |
+| **Anthropic API** *(optional fallback)* | Opt-in, off by default | The News & Filings narrative summary, plus a paid per-filing "Analyze" path — only when `ANTHROPIC_API_KEY` is set **and** the Settings-popover fallback toggle is on; never auto-run. |
 
 Fundamentals are never fetched from an API; live prices/returns for the short
 windows are never read from the spreadsheet.
@@ -61,7 +61,7 @@ filter and grouping dimension across the app, rendered as colored chips.
   sentiment chip and net read — tagged **"Imported · analyzed in Claude"**, with
   no API call. Imports survive restarts (they're files on disk) and take
   precedence over everything.
-  - *Optional paid fallback:* with `ANTHROPIC_API_KEY` set **and** the sidebar
+  - *Optional paid fallback:* with `ANTHROPIC_API_KEY` set **and** the Settings-popover
     "Enable paid API analysis (fallback)" toggle on (off by default), filings
     without an import get an "Analyze (paid API)" button. On click only, the app
     fetches the document from EDGAR, converts HTML → clean text, trims for cost
@@ -122,7 +122,7 @@ streamlit run app.py
 ## Project structure
 
 ```
-app.py                  # entry, nav, layout, CSS injection
+app.py                  # entry, horizontal top-nav (option-menu), toolbar filters, CSS
 data/morningstar.py     # load + clean the Excel + join bucket_mapping.csv taxonomy
 data/fmp_client.py      # FMP wrapper: history, quotes, news, institutional, insider
 data/edgar_client.py    # SEC EDGAR: CIK resolution, filings, document fetch + HTML→text + trim

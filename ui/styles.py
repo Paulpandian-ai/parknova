@@ -47,62 +47,82 @@ html, body, [class*="css"], .stApp, [data-testid="stAppViewContainer"] {{
 }}
 .stApp {{ background-color: #FFFFFF; }}
 
+/* Hide default Streamlit chrome */
 #MainMenu {{ visibility: hidden; }}
 footer {{ visibility: hidden; }}
+[data-testid="stToolbar"] {{ visibility: hidden; height: 0; }}
+[data-testid="stDecoration"] {{ display: none; }}
 header[data-testid="stHeader"] {{ background: transparent; height: 0; }}
+section[data-testid="stSidebar"] {{ display: none; }}
 
-.block-container {{ padding-top: 1.1rem; padding-bottom: 2rem; max-width: 1500px; }}
-
-/* Header bar */
-.app-header {{
-    background: linear-gradient(90deg, {NAVY} 0%, {PRIMARY} 100%);
-    color: #FFFFFF; padding: 18px 26px; border-radius: 14px;
-    margin-bottom: 16px; box-shadow: 0 6px 20px rgba(30,58,138,0.18);
+/* Dense, centered, constrained content */
+.block-container {{
+    padding-top: 0.8rem; padding-bottom: 2rem;
+    max-width: 1400px; margin: 0 auto;
 }}
-.app-header h1 {{ font-size: 1.55rem; font-weight: 700; margin: 0; letter-spacing: -0.01em; color:#fff; }}
-.app-header p {{ margin: 3px 0 0; font-size: 0.9rem; opacity: 0.88; color: #E2E8F0; }}
 
-/* Stat cards */
+/* Slim flat header bar */
+.app-header {{
+    background: {NAVY};
+    color: #FFFFFF; padding: 12px 20px; border-radius: 8px;
+    margin-bottom: 8px;
+}}
+.app-header h1 {{ font-size: 1.15rem; font-weight: 700; margin: 0;
+    letter-spacing: -0.01em; color:#fff; }}
+.app-header p {{ margin: 1px 0 0; font-size: 0.8rem; opacity: 0.82; color: #E2E8F0; }}
+
+/* Stat cards — consistent height, hairline border, 12px radius */
 .metric-card {{
     background: #FFFFFF; border: 1px solid {BORDER}; border-radius: 12px;
-    padding: 14px 16px; box-shadow: 0 1px 3px rgba(15,23,42,0.06); height: 100%;
+    padding: 12px 14px; min-height: 78px; box-sizing: border-box;
 }}
-.metric-card .label {{ font-size: 0.74rem; color: {MUTED}; font-weight: 600;
-    text-transform: uppercase; letter-spacing: 0.04em; }}
-.metric-card .value {{ font-size: 1.3rem; font-weight: 700; color: {TEXT}; margin-top: 3px; }}
-.metric-card .sub {{ font-size: 0.8rem; color: {MUTED}; margin-top: 1px; }}
+.metric-card .label {{ font-size: 0.7rem; color: {MUTED}; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.05em; }}
+.metric-card .value {{ font-size: 1.25rem; font-weight: 700; color: {TEXT};
+    margin-top: 4px; }}
+.metric-card .sub {{ font-size: 0.78rem; color: {MUTED}; margin-top: 2px; }}
 .value.pos {{ color: {POSITIVE}; }}
 .value.neg {{ color: {NEGATIVE}; }}
 
-/* Chips & badges */
-.chip {{ display:inline-block; padding:2px 10px; border-radius:999px;
-    font-size:0.76rem; font-weight:600; color:#fff; }}
+/* Chips & badges — flat, solid subtle fills, consistent pill radius */
+.chip {{ display:inline-block; padding:2px 10px; border-radius:6px;
+    font-size:0.74rem; font-weight:600; color:#fff; }}
 .badge-grade {{ display:inline-block; width:22px; height:22px; line-height:22px;
     text-align:center; border-radius:6px; font-size:0.8rem; font-weight:700; color:#fff; }}
 .stars {{ color:#F59E0B; font-size:1.0rem; letter-spacing:1px; }}
 
 /* Detail header */
-.detail-head .name {{ font-size:1.5rem; font-weight:700; color:{TEXT}; }}
+.detail-head .name {{ font-size:1.4rem; font-weight:700; color:{TEXT}; }}
 .detail-head .tk {{ color:{MUTED}; font-weight:600; }}
 .detail-head .meta {{ font-size:0.9rem; color:{MUTED}; margin-top:2px; }}
 .relevance {{ color:{MUTED}; font-size:0.9rem; margin:6px 0 12px; }}
 
-/* News */
-.news-item {{ border:1px solid {BORDER}; border-radius:10px; padding:12px 14px;
-    margin-bottom:10px; background:#fff; }}
-.news-item a {{ color:{NAVY}; font-weight:600; text-decoration:none; font-size:0.96rem; }}
+/* News / filing items */
+.news-item {{ border:1px solid {BORDER}; border-radius:8px; padding:12px 14px;
+    margin-bottom:8px; background:#fff; }}
+.news-item a {{ color:{NAVY}; font-weight:600; text-decoration:none; font-size:0.94rem; }}
 .news-item a:hover {{ color:{PRIMARY}; text-decoration:underline; }}
 .news-meta {{ font-size:0.78rem; color:{MUTED}; margin-top:4px; }}
 
-.stButton > button {{ border-radius:9px; border:1px solid {BORDER}; font-weight:600; }}
+/* Buttons — hairline, slate, blue on hover */
+.stButton > button {{ border-radius:8px; border:1px solid {BORDER};
+    font-weight:600; color:{TEXT}; background:#fff; }}
 .stButton > button:hover {{ border-color:{PRIMARY}; color:{PRIMARY}; }}
 
-.stTabs [data-baseweb="tab-list"] {{ gap:4px; }}
-.stTabs [data-baseweb="tab"] {{ font-weight:600; color:{MUTED}; border-radius:8px 8px 0 0; }}
-.stTabs [aria-selected="true"] {{ color:{PRIMARY}; }}
+/* Tables — hairline border, light header, comfortable rows */
+[data-testid="stDataFrame"] {{ border:1px solid {BORDER}; border-radius:8px; }}
+[data-testid="stDataFrame"] thead tr th {{
+    background:{SURFACE}; color:{MUTED}; font-weight:600; }}
 
-[data-testid="stDataFrame"] {{ border:1px solid {BORDER}; border-radius:10px; }}
-.section-title {{ font-size:1.05rem; font-weight:700; color:{NAVY}; margin:10px 0 4px; }}
+/* Titles */
+.section-title {{ font-size:1.0rem; font-weight:700; color:{NAVY};
+    margin:8px 0 4px; }}
+.view-title {{ font-size:1.25rem; font-weight:700; color:{NAVY};
+    margin:4px 0 8px; letter-spacing:-0.01em; }}
+.muted-note {{ font-size:0.78rem; color:{MUTED}; }}
+
+/* Tighten multiselect / inputs in the filter toolbar */
+[data-testid="stHorizontalBlock"] {{ gap: 0.6rem; }}
 </style>
 """
 
@@ -116,3 +136,23 @@ def app_header(title: str, subtitle: str) -> None:
         f'<div class="app-header"><h1>{title}</h1><p>{subtitle}</p></div>',
         unsafe_allow_html=True,
     )
+
+
+# Enterprise styling for the streamlit-option-menu horizontal nav.
+def nav_styles() -> dict:
+    return {
+        "container": {"padding": "0", "background-color": "transparent",
+                      "margin-bottom": "10px"},
+        "nav-link": {
+            "font-size": "0.9rem", "font-weight": "600", "color": MUTED,
+            "background-color": "transparent", "padding": "8px 14px",
+            "margin": "0 2px", "border-radius": "0",
+            "border-bottom": "2px solid transparent", "--hover-color": SURFACE_2,
+        },
+        "nav-link-selected": {
+            "color": PRIMARY, "background-color": "transparent",
+            "font-weight": "700", "border-bottom": f"2px solid {PRIMARY}",
+            "border-radius": "0",
+        },
+        "icon": {"display": "none"},
+    }

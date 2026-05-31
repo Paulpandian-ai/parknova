@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
+from streamlit_option_menu import option_menu
 
 from core import factors as fc
 from core import performance as perf
@@ -23,28 +24,71 @@ from ui import styles
 load_dotenv()
 
 st.set_page_config(page_title="ParkNova — AI Equities Analyzer",
-                   page_icon="📈", layout="wide",
-                   initial_sidebar_state="expanded")
+                   layout="wide", initial_sidebar_state="collapsed")
 styles.inject_css()
 
 
 # ---------------------------------------------------------------------------
-# Filters
+# Filters — applied from persistent session_state; rendered as a top toolbar
 # ---------------------------------------------------------------------------
-def sidebar_filters(df: pd.DataFrame) -> pd.DataFrame:
-    with st.sidebar:
-        st.markdown("### 🔎 Filters")
-        st.text_input("Search ticker / name", key="search", placeholder="e.g. NVDA")
-        st.multiselect("Primary bucket", ms.bucket_options(df), key="buckets")
-        st.multiselect("Sector", ms.sector_options(df), key="sectors")
-        st.multiselect("Style box", ms.style_options(df), key="styles")
-        st.divider()
-        if st.button("🔄 Refresh live data", width="stretch"):
+def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
+    """Filter ``df`` using the shared, persisted toolbar state."""
+    out = df
+    if st.session_state.get("buckets"):
+        out = out[out["Primary Bucket"].isin(st.session_state["buckets"])]
+    if st.session_state.get("sectors"):
+        out = out[out["Sector"].isin(st.session_state["sectors"])]
+    if st.session_state.get("styles"):
+        out = out[out["Stock Style Box"].isin(st.session_state["styles"])]
+    q = (st.session_state.get("search", "") or "").strip().lower()
+    if q:
+        mask = (out["Ticker"].str.lower().str.contains(q, na=False)
+                | out["Name"].str.lower().str.contains(q, na=False))
+        out = out[mask]
+    return out.reset_index(drop=True)
+
+
+def filter_toolbar(df: pd.DataFrame, *, bucket=True, sector=True, style=True):
+    """Render a compact one-row filter toolbar under the view title.
+
+    All controls write to shared session_state keys (search/buckets/sectors/
+    styles) so state persists across views and reruns. Only the requested
+    filters are shown; the row wraps gracefully on narrow widths.
+    """
+    specs = [("search", 2.0)]
+    if bucket:
+        specs.append(("buckets", 2.2))
+    if sector:
+        specs.append(("sectors", 2.2))
+    if style:
+        specs.append(("styles", 2.0))
+    cols = st.columns([w for _, w in specs])
+    for col, (kind, _) in zip(cols, specs):
+        with col:
+            if kind == "search":
+                st.text_input("Search", key="search",
+                              placeholder="Ticker or name",
+                              label_visibility="collapsed")
+            elif kind == "buckets":
+                st.multiselect("Primary bucket", ms.bucket_options(df),
+                               key="buckets", placeholder="Primary bucket",
+                               label_visibility="collapsed")
+            elif kind == "sectors":
+                st.multiselect("Sector", ms.sector_options(df), key="sectors",
+                               placeholder="Sector", label_visibility="collapsed")
+            elif kind == "styles":
+                st.multiselect("Style box", ms.style_options(df), key="styles",
+                               placeholder="Style box",
+                               label_visibility="collapsed")
+
+
+def settings_popover() -> None:
+    """Top-right Settings popover: refresh + paid-API toggle + data note."""
+    with st.popover("Settings", use_container_width=True):
+        if st.button("Refresh live data", width="stretch"):
             service.clear_live_caches()
             st.success("Live caches cleared.")
             st.rerun()
-        # Filing analysis defaults to the zero-cost import path; the paid
-        # Anthropic API is an explicit, off-by-default fallback (Change 4).
         if anth.has_anthropic_key():
             st.toggle("Enable paid API analysis (fallback)", value=False,
                       key="paid_api_fallback",
@@ -52,26 +96,10 @@ def sidebar_filters(df: pd.DataFrame) -> pd.DataFrame:
                            "from the sec-filing-analyzer skill (free on your "
                            "Claude Max plan). Turn on to also allow the paid "
                            "Anthropic API 'Analyze' buttons.")
-        st.caption("Fundamentals & trailing returns: Morningstar (static). "
-                   "Today/1W/1M/3M/6M + news: FMP live (quotes cached 15m, "
-                   "news 30m).")
-
-    out = df
-    buckets = st.session_state.get("buckets", [])
-    if buckets:
-        out = out[out["Primary Bucket"].isin(buckets)]
-    sectors = st.session_state.get("sectors", [])
-    if sectors:
-        out = out[out["Sector"].isin(sectors)]
-    stylebox = st.session_state.get("styles", [])
-    if stylebox:
-        out = out[out["Stock Style Box"].isin(stylebox)]
-    q = (st.session_state.get("search", "") or "").strip().lower()
-    if q:
-        mask = (out["Ticker"].str.lower().str.contains(q, na=False)
-                | out["Name"].str.lower().str.contains(q, na=False))
-        out = out[mask]
-    return out.reset_index(drop=True)
+        st.markdown(
+            '<div class="muted-note">Fundamentals &amp; trailing returns: '
+            'Morningstar (static). Today/1W/1M/3M/6M + news: FMP live '
+            '(quotes cached 15m, news 30m).</div>', unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------------------
@@ -89,9 +117,11 @@ def build_performance(full: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 # View: Performance
 # ---------------------------------------------------------------------------
-def view_performance(perf_full: pd.DataFrame, filtered_tickers: set):
-    st.markdown('<div class="section-title">Performance & Momentum</div>',
+def view_performance(full: pd.DataFrame, perf_full: pd.DataFrame):
+    st.markdown('<div class="view-title">Performance &amp; Momentum</div>',
                 unsafe_allow_html=True)
+    filter_toolbar(full)
+    filtered_tickers = set(apply_filters(full)["Ticker"])
     df = perf_full[perf_full["Ticker"].isin(filtered_tickers)].reset_index(drop=True)
     if df.empty:
         st.warning("No names match the current filters.")
@@ -126,8 +156,8 @@ def view_performance(perf_full: pd.DataFrame, filtered_tickers: set):
             cp.stat_card(f"Worst ({sel})", cp.DASH)
 
     st.write("")
-    t_table, t_mom, t_heat = st.tabs(["📋 Returns table", "🚀 Momentum rank",
-                                      "🔥 Heatmap"])
+    t_table, t_mom, t_heat = st.tabs(["Returns table", "Momentum rank",
+                                      "Heatmap"])
     with t_table:
         _performance_table(df, sel)
     with t_mom:
@@ -149,10 +179,12 @@ def _performance_table(df: pd.DataFrame, sort_win: str):
     fmt = {"Last Price": cp.fmt_price}
     for w in perf.ALL_WINDOWS:
         fmt[w] = lambda v: cp.fmt_pct_frac(v)
+    num_cols = ["Last Price"] + perf.ALL_WINDOWS
     styler = (view.style.format(fmt, na_rep=cp.DASH)
               .map(cp.return_bg, subset=perf.ALL_WINDOWS)
               .map(cp.bucket_cell_bg, subset=["Primary Bucket"])
-              .set_properties(**{"font-size": "0.88rem"}))
+              .set_properties(**{"font-size": "0.88rem"})
+              .set_properties(subset=num_cols, **{"text-align": "right"}))
     st.dataframe(styler, width="stretch", hide_index=True, height=560)
 
 
@@ -175,11 +207,12 @@ def _momentum_rank(df: pd.DataFrame):
 # ---------------------------------------------------------------------------
 # View: Fundamentals & Factors
 # ---------------------------------------------------------------------------
-def view_fundamentals(full: pd.DataFrame, scores: pd.DataFrame,
-                      filtered_tickers: set):
-    st.markdown('<div class="section-title">Fundamentals & Factor Analysis</div>',
+def view_fundamentals(full: pd.DataFrame, scores: pd.DataFrame):
+    st.markdown('<div class="view-title">Fundamentals &amp; Factor Analysis</div>',
                 unsafe_allow_html=True)
-    sub_fund, sub_fac = st.tabs(["📑 Fundamentals", "🧮 Factor scores"])
+    filter_toolbar(full)
+    filtered_tickers = set(apply_filters(full)["Ticker"])
+    sub_fund, sub_fac = st.tabs(["Fundamentals", "Factor scores"])
     with sub_fund:
         _fundamentals_table(full, filtered_tickers)
     with sub_fac:
@@ -252,9 +285,11 @@ def _factor_scores_table(scores: pd.DataFrame, filtered_tickers: set):
 # ---------------------------------------------------------------------------
 # View: Screener
 # ---------------------------------------------------------------------------
-def view_screener(scores: pd.DataFrame, filtered_tickers: set):
-    st.markdown('<div class="section-title">Screener — weighted factor ranking</div>',
+def view_screener(full: pd.DataFrame, scores: pd.DataFrame):
+    st.markdown('<div class="view-title">Screener — weighted factor ranking</div>',
                 unsafe_allow_html=True)
+    filter_toolbar(full)
+    filtered_tickers = set(apply_filters(full)["Ticker"])
     st.caption("Adjust factor weights to re-rank the universe live by the "
                "weighted composite.")
 
@@ -291,11 +326,13 @@ def view_screener(scores: pd.DataFrame, filtered_tickers: set):
 # View: Buckets (slice-and-dice)
 # ---------------------------------------------------------------------------
 def view_buckets(full: pd.DataFrame, perf_full: pd.DataFrame,
-                 scores: pd.DataFrame, filtered_tickers: set):
-    st.markdown('<div class="section-title">Buckets — AI sub-theme slice & dice</div>',
-                unsafe_allow_html=True)
+                 scores: pd.DataFrame):
+    st.markdown('<div class="view-title">Buckets — AI sub-theme slice &amp; dice'
+                '</div>', unsafe_allow_html=True)
+    filter_toolbar(full)
+    filtered_tickers = set(apply_filters(full)["Ticker"])
 
-    # Respect the sidebar filters for the cohort being analysed.
+    # Respect the active filters for the cohort being analysed.
     pf = perf_full[perf_full["Ticker"].isin(filtered_tickers)].reset_index(drop=True)
     fd = full[full["Ticker"].isin(filtered_tickers)].reset_index(drop=True)
     sc = scores[scores["Ticker"].isin(filtered_tickers)].reset_index(drop=True)
@@ -309,7 +346,7 @@ def view_buckets(full: pd.DataFrame, perf_full: pd.DataFrame,
     summary = _bucket_summary(pf, fd, sc, win)
 
     t_sum, t_board, t_drill = st.tabs(
-        ["📊 Summary", "🏆 Leaderboard", "🔬 Drill-down"])
+        ["Summary", "Leaderboard", "Drill-down"])
 
     with t_sum:
         st.caption("One row per bucket — counts, returns, valuation, quality and "
@@ -414,15 +451,11 @@ def _bucket_drilldown(pf, sc, summary):
 # View: News & Filings (Feature B)
 # ---------------------------------------------------------------------------
 def view_news(full: pd.DataFrame, perf_full: pd.DataFrame,
-              scores: pd.DataFrame, filtered_tickers: set):
-    st.markdown('<div class="section-title">News & Filings</div>',
+              scores: pd.DataFrame):
+    st.markdown('<div class="view-title">News &amp; Filings</div>',
                 unsafe_allow_html=True)
-    df = full[full["Ticker"].isin(filtered_tickers)]
-    options = df["Ticker"].tolist()
-    if not options:
-        st.warning("No names match the current filters.")
-        return
-    labels = dict(zip(df["Ticker"], df["Name"]))
+    options = full["Ticker"].tolist()
+    labels = dict(zip(full["Ticker"], full["Name"]))
     ticker = st.selectbox("Ticker", options,
                           format_func=lambda t: f"{t} · {labels.get(t, '')}",
                           key="news_ticker")
@@ -450,7 +483,7 @@ def view_news(full: pd.DataFrame, perf_full: pd.DataFrame,
 
     st.write("")
     t_news, t_sec, t_inst, t_ins = st.tabs(
-        ["📰 News", "🏛️ SEC Filings", "🏦 Institutional", "👤 Insider"])
+        ["News", "SEC Filings", "Institutional", "Insider"])
     with t_news:
         if not service.has_api_key():
             st.info("Set FMP_API_KEY to load live news.")
@@ -513,7 +546,7 @@ def _ai_summary_card(ticker, name, news, filings, glance, holders):
     """Opt-in Anthropic narrative; only shown when a key is present."""
     if not anth.has_anthropic_key():
         return
-    enabled = st.toggle("🤖 AI summary (generated)", value=False, key="ai_sum")
+    enabled = st.toggle("AI summary (generated)", value=False, key="ai_sum")
     if not enabled:
         return
 
@@ -585,12 +618,12 @@ def _handle_import_uploader(uploaded) -> None:
 
 def _sec_filings_panel(ticker: str, filings: list):
     st.caption("Analyze filings **free under your Claude Max plan**: copy a "
-               "filing reference → run the `sec-filing-analyzer` skill in Claude "
-               "→ import the JSON here.")
+               "filing reference, run the `sec-filing-analyzer` skill in Claude, "
+               "then import the JSON here.")
 
     # Uploader (accepts one or many skill-produced JSON files).
     uploaded = st.file_uploader(
-        "⬆ Import filing analysis (JSON)", type=["json"],
+        "Import filing analysis (JSON)", type=["json"],
         accept_multiple_files=True, key=f"import_{ticker}",
         help="Drop the JSON produced by the sec-filing-analyzer skill. Files are "
              "saved to .cache/filings/imported/ and matched by accession number.")
@@ -619,7 +652,7 @@ def _sec_filings_panel(ticker: str, filings: list):
 
     # Optional paid multi-filing synthesis (only under the fallback toggle).
     if paid_enabled:
-        if st.button("🧵 Analyze recent filing activity (paid API)",
+        if st.button("Analyze recent filing activity (paid API)",
                      key="analyze_activity"):
             _run_activity_synthesis(ticker, filings[:5], model)
         syn = st.session_state.get("_filing_activity")
@@ -691,12 +724,10 @@ _DETAIL_WINDOWS = {"1W": pd.DateOffset(weeks=1), "1M": pd.DateOffset(months=1),
 
 
 def view_detail(full: pd.DataFrame, perf_full: pd.DataFrame,
-                scores: pd.DataFrame, filtered_tickers: set):
-    st.markdown('<div class="section-title">Stock Detail</div>',
+                scores: pd.DataFrame):
+    st.markdown('<div class="view-title">Stock Detail</div>',
                 unsafe_allow_html=True)
-    pool = full[full["Ticker"].isin(filtered_tickers)]
-    if pool.empty:
-        pool = full
+    pool = full
     options = pool["Ticker"].tolist()
     labels = dict(zip(pool["Ticker"], pool["Name"]))
     ticker = st.selectbox("Select a ticker", options,
@@ -821,10 +852,20 @@ def _detail_fundamentals(row: pd.Series):
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+NAV_ITEMS = ["Performance", "Fundamentals & Factors", "Screener", "Buckets",
+             "News & Filings", "Stock Detail"]
+
+
 def main():
-    styles.app_header(
-        "ParkNova — AI Equities Analyzer",
-        "Morningstar fundamentals + live FMP momentum & news across the AI universe")
+    # Slim header bar + Settings popover (top-right), no sidebar.
+    head_col, set_col = st.columns([6, 1])
+    with head_col:
+        styles.app_header(
+            "ParkNova — AI Equities Analyzer",
+            "Morningstar fundamentals · live FMP momentum & news across the "
+            "AI universe")
+    with set_col:
+        settings_popover()
 
     if not service.has_api_key():
         st.error("**FMP_API_KEY not found.** Copy `.env.example` to `.env` and add "
@@ -838,8 +879,10 @@ def main():
         st.error(str(e))
         st.stop()
 
-    filtered = sidebar_filters(full)
-    filtered_tickers = set(filtered["Ticker"])
+    # Horizontal text-only nav (no emoji), enterprise styling, active underline.
+    selected = option_menu(
+        menu_title=None, options=NAV_ITEMS, orientation="horizontal",
+        default_index=0, key="nav", styles=styles.nav_styles())
 
     # Build live performance once (handles missing key gracefully -> NaNs).
     if service.has_api_key():
@@ -858,20 +901,19 @@ def main():
     scores.insert(2, "Primary Bucket", merged["Primary Bucket"].values)
     scores.insert(3, "Sector", merged["Sector"].values)
 
-    tabs = st.tabs(["📈 Performance", "📊 Fundamentals & Factors", "🧪 Screener",
-                    "🧩 Buckets", "📰 News & Filings", "🔍 Stock Detail"])
-    with tabs[0]:
-        view_performance(perf_full, filtered_tickers)
-    with tabs[1]:
-        view_fundamentals(full, scores, filtered_tickers)
-    with tabs[2]:
-        view_screener(scores, filtered_tickers)
-    with tabs[3]:
-        view_buckets(full, perf_full, scores, filtered_tickers)
-    with tabs[4]:
-        view_news(full, perf_full, scores, filtered_tickers)
-    with tabs[5]:
-        view_detail(full, perf_full, scores, filtered_tickers)
+    # Render only the active view (option_menu, unlike st.tabs, renders one).
+    if selected == "Performance":
+        view_performance(full, perf_full)
+    elif selected == "Fundamentals & Factors":
+        view_fundamentals(full, scores)
+    elif selected == "Screener":
+        view_screener(full, scores)
+    elif selected == "Buckets":
+        view_buckets(full, perf_full, scores)
+    elif selected == "News & Filings":
+        view_news(full, perf_full, scores)
+    elif selected == "Stock Detail":
+        view_detail(full, perf_full, scores)
 
 
 if __name__ == "__main__":
