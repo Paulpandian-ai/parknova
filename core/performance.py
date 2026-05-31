@@ -93,6 +93,8 @@ def build_performance_frame(
             "Name": meta.get("Name"),
             "Sector": meta.get("Sector"),
             "Primary Bucket": meta.get("Primary Bucket"),
+            "Side": meta.get("Side"),
+            "Crest": meta.get("Crest"),
             "Stock Style Box": meta.get("Stock Style Box"),
             "Last Price": price,
             "has_live": not series.empty or bool(q),

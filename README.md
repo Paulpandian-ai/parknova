@@ -9,6 +9,7 @@ curated universe of ~226 AI-related stocks.
 | --- | --- | --- |
 | **Morningstar Excel** (`AI_Equities_Universe_Data from MorningStar.xlsx`) | Primary, static | **All** fundamentals, valuation, profitability, growth, financial health, Morningstar moat/rating/fair-value, and trailing returns (YTD/1Y/3Y/5Y). |
 | **`bucket_mapping.csv`** | Static taxonomy | Curated **Primary Bucket** per ticker (the 10 AI sub-themes) + secondary bucket weights. Left-joined on `Ticker`. |
+| **`crest_timing_mapping.csv`** | Static taxonomy | **Side** (Supplier / Demand-Neocloud / Hyperscaler) and **Crest** (Early / Mid / Late capex-wave layer) per ticker + a rationale line. Left-joined on `Ticker`; missing → Side=Unknown, Crest=Mid (logged). |
 | **Financial Modeling Prep (FMP)** — **stable API** | Live, secondary | Short-window momentum (Today/1W/1M/3M/6M from daily close), news, and (if your plan includes them) institutional / insider data. `data/fmp_client.py` targets `https://financialmodelingprep.com/stable/...` (the legacy `/api/v3` paths now return HTTP 403 "Legacy Endpoint"). Each method has an inline comment with its exact stable URL + params; responses are normalised back to the field names the app uses. |
 | **Finnhub** (free tier) | Live quotes + history fallback | Near-real-time US quotes (price + today's %), and daily candles used as a **history fallback** when FMP history is unavailable. Set `FINNHUB_API_KEY` (free at [finnhub.io](https://finnhub.io)). Note: free-tier candles are currently gated for many symbols, so FMP-stable is the primary history source. |
 | **SEC EDGAR** | Live, authoritative | Recent SEC filings (10-K/Q, 8-K, S-1/424B, SC 13D/G). Free; requires a descriptive User-Agent. |
@@ -46,6 +47,22 @@ filter and grouping dimension across the app, rendered as colored chips.
 - **Buckets** (slice-and-dice) — a per-bucket summary table (counts, returns,
   median P/E/ROE/Rev-growth, median factor scores, avg ★), a return leaderboard
   bar chart, a constituent drill-down, and a bucket-vs-universe factor profile.
+- **Capex Cycle** (timing dashboard) — a **Crest × Side matrix** (where capital
+  is concentrated: count + median 1Y + median forward P/E per cell), a **rotation
+  tracker** (median return per crest layer × window, with a *computed* caption like
+  "Last 1M: Early-crest +X% vs Late-crest −Y% → capital rotating toward
+  early-crest layers" — derived from the data, falling back to Morningstar YTD/1Y
+  if the live feed is empty), and a **layer leaderboard** (constituents of a crest
+  layer with pullback-from-52w-high, forward P/E, valuation tier, and the
+  value-trap chip). The framework: **Side** = sells into the buildout (Supplier) /
+  buys the compute (Demand-Neocloud) / Hyperscaler counterparty; **Crest** = where
+  the layer sits in the capex wave (Early chips/memory/optics → Mid equipment/
+  software/networking → Late power/cooling/grid); plus a **valuation tier** and a
+  **value-trap flag** (low forward P/E + Early-crest cyclical + extended 1Y run —
+  the "single-digit memory at the cycle top" signature). Side/Crest are filters
+  and chips across every data view and Stock Detail; the Screener supports
+  timing-aware value (crest tilt + sort by upside-to-fair-value, value-trap
+  flagged).
 - **News & Filings** — for a selected ticker: a deterministic "At a glance"
   digest (news sentiment tally, filing counts 30/90d, net 90-day insider $, top
   institutional changes, implied upside), an optional AI summary, then tabs for

@@ -45,6 +45,18 @@ BUCKET_ORDER: List[str] = [
 ]
 _VALID_BUCKETS = set(BUCKET_ORDER) - {UNCLASSIFIED}
 
+# Curated Side / Crest timing taxonomy (Capex Cycle). Joined from
+# crest_timing_mapping.csv. Side = who they are in the buildout; Crest = where
+# the layer sits in the capex wave (Early chips/memory/optics -> Mid equipment/
+# software/networking -> Late power/cooling/grid).
+CREST_MAPPING_FILENAME = "crest_timing_mapping.csv"
+SIDE_UNKNOWN = "Unknown"
+CREST_DEFAULT = "Mid"
+SIDE_ORDER: List[str] = ["Supplier", "Demand", "Hyperscaler", SIDE_UNKNOWN]
+CREST_ORDER: List[str] = ["Early", "Mid", "Late"]
+_VALID_SIDES = {"Supplier", "Demand", "Hyperscaler"}
+_VALID_CRESTS = set(CREST_ORDER)
+
 # --- Identity / price -------------------------------------------------------
 ID_COLS = ["Ticker", "Name", "Sector", "Stock Style Box", "Last Price",
            "Day Change", "Day Change (%)"]
@@ -218,6 +230,9 @@ def load_morningstar(path: str | None = None) -> pd.DataFrame:
     # Join the curated Primary Bucket taxonomy (Feature A).
     df = _join_buckets(df, os.path.dirname(p))
 
+    # Join the curated Side / Crest timing taxonomy (Capex Cycle).
+    df = _join_crest(df, os.path.dirname(p))
+
     df = df.copy().reset_index(drop=True)  # de-fragment
     return df
 
@@ -302,8 +317,67 @@ def _join_buckets(df: pd.DataFrame, root: str) -> pd.DataFrame:
     return df
 
 
+def _join_crest(df: pd.DataFrame, root: str) -> pd.DataFrame:
+    """Left-join Side / Crest / Crest Rationale onto ``df`` by Ticker.
+
+    Missing or invalid -> Side=Unknown, Crest=Mid (logged), so every ticker has
+    a timing position and nothing downstream crashes.
+    """
+    path = os.path.join(root or os.getcwd(), CREST_MAPPING_FILENAME)
+    mapping = None
+    if os.path.exists(path):
+        try:
+            mapping = pd.read_csv(path, dtype=str)
+            mapping["Ticker"] = mapping["Ticker"].astype(str).str.strip().str.upper()
+        except Exception as exc:  # malformed -> degrade, do not crash
+            logger.warning("Failed reading crest_timing_mapping.csv: %s", exc)
+            mapping = None
+    else:
+        logger.warning("crest_timing_mapping.csv not found at %s; all tickers "
+                       "will be Side=Unknown / Crest=Mid.", path)
+
+    if mapping is not None:
+        keep = [c for c in ["Ticker", "Side", "Crest", "Crest Rationale"]
+                if c in mapping.columns]
+        df = df.merge(mapping[keep], on="Ticker", how="left")
+    for col in ["Side", "Crest", "Crest Rationale"]:
+        if col not in df.columns:
+            df[col] = None
+
+    def _norm_side(v: object) -> str:
+        s = str(v).strip() if v is not None and not (isinstance(v, float)
+                                                     and pd.isna(v)) else ""
+        return s if s in _VALID_SIDES else SIDE_UNKNOWN
+
+    def _norm_crest(v: object) -> str:
+        s = str(v).strip() if v is not None and not (isinstance(v, float)
+                                                     and pd.isna(v)) else ""
+        return s if s in _VALID_CRESTS else CREST_DEFAULT
+
+    df["Side"] = df["Side"].map(_norm_side)
+    df["Crest"] = df["Crest"].map(_norm_crest)
+    df["Crest Rationale"] = df["Crest Rationale"].where(
+        df["Crest Rationale"].notna(), None)
+
+    missing = df.loc[df["Side"] == SIDE_UNKNOWN, "Ticker"].tolist()
+    if missing:
+        logger.warning("%d ticker(s) with no Side/Crest mapping (-> Unknown/Mid):"
+                       " %s", len(missing), ", ".join(missing))
+    return df
+
+
 def sector_options(df: pd.DataFrame) -> List[str]:
     return sorted(df["Sector"].dropna().unique().tolist())
+
+
+def side_options(df: pd.DataFrame) -> List[str]:
+    present = set(df["Side"].dropna().unique())
+    return [s for s in SIDE_ORDER if s in present]
+
+
+def crest_options(df: pd.DataFrame) -> List[str]:
+    present = set(df["Crest"].dropna().unique())
+    return [c for c in CREST_ORDER if c in present]
 
 
 def style_options(df: pd.DataFrame) -> List[str]:

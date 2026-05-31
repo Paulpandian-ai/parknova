@@ -114,6 +114,29 @@ def bucket_chip(bucket) -> str:
     return f'<span class="chip" style="background:{color}">{bucket}</span>'
 
 
+def crest_chip(crest) -> str:
+    if _missing(crest):
+        return ""
+    color = styles.CREST_COLORS.get(str(crest), styles.MUTED)
+    return (f'<span class="chip" style="background:{color}">{crest}-crest</span>')
+
+
+def side_chip(side) -> str:
+    if _missing(side) or str(side) == "Unknown":
+        return ""
+    color = styles.SIDE_COLORS.get(str(side), styles.MUTED)
+    return f'<span class="chip" style="background:{color}">{side}</span>'
+
+
+def value_trap_chip(reason: str = "") -> str:
+    """Amber-outline 'Value-trap watch' chip with a warning tooltip."""
+    tip = (reason or "Low multiple on an extended early-crest cyclical.").replace(
+        '"', "&quot;")
+    return (f'<span class="chip" title="{tip}" style="background:#FEF3C7;'
+            f'color:{styles.TRAP_AMBER};border:1px solid {styles.TRAP_AMBER};">'
+            f'Value-trap watch</span>')
+
+
 # Form-group -> (color, label) for SEC filing badges.
 _FORM_BADGE = {
     "financials": ("#2563EB", "Financials"),
@@ -164,6 +187,25 @@ def bucket_cell_bg(bucket) -> str:
     r, g, b = _hex_to_rgb(color)
     return (f"background-color: rgba({r},{g},{b},0.16); "
             f"color:{color}; font-weight:600;")
+
+
+def _palette_cell_bg(value, palette: dict) -> str:
+    if _missing(value):
+        return ""
+    color = palette.get(str(value))
+    if not color:
+        return ""
+    r, g, b = _hex_to_rgb(color)
+    return (f"background-color: rgba({r},{g},{b},0.16); "
+            f"color:{color}; font-weight:600;")
+
+
+def crest_cell_bg(crest) -> str:
+    return _palette_cell_bg(crest, styles.CREST_COLORS)
+
+
+def side_cell_bg(side) -> str:
+    return _palette_cell_bg(side, styles.SIDE_COLORS)
 
 
 def zscore_bg(val, scale: float = 1.5) -> str:

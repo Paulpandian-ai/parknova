@@ -15,6 +15,7 @@ from streamlit_option_menu import option_menu
 from core import factors as fc
 from core import performance as perf
 from core import synthesis as synth
+from core import timing as tm
 from data import anthropic_client as anth
 from data import morningstar as ms
 from data import service
@@ -40,6 +41,10 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
         out = out[out["Sector"].isin(st.session_state["sectors"])]
     if st.session_state.get("styles"):
         out = out[out["Stock Style Box"].isin(st.session_state["styles"])]
+    if st.session_state.get("sides"):
+        out = out[out["Side"].isin(st.session_state["sides"])]
+    if st.session_state.get("crests"):
+        out = out[out["Crest"].isin(st.session_state["crests"])]
     q = (st.session_state.get("search", "") or "").strip().lower()
     if q:
         mask = (out["Ticker"].str.lower().str.contains(q, na=False)
@@ -48,20 +53,25 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
     return out.reset_index(drop=True)
 
 
-def filter_toolbar(df: pd.DataFrame, *, bucket=True, sector=True, style=True):
+def filter_toolbar(df: pd.DataFrame, *, bucket=True, sector=True, style=True,
+                   side=True, crest=True):
     """Render a compact one-row filter toolbar under the view title.
 
     All controls write to shared session_state keys (search/buckets/sectors/
-    styles) so state persists across views and reruns. Only the requested
-    filters are shown; the row wraps gracefully on narrow widths.
+    styles/sides/crests) so state persists across views and reruns. Only the
+    requested filters are shown; the row wraps gracefully on narrow widths.
     """
-    specs = [("search", 2.0)]
+    specs = [("search", 1.8)]
     if bucket:
-        specs.append(("buckets", 2.2))
+        specs.append(("buckets", 2.0))
+    if side:
+        specs.append(("sides", 1.5))
+    if crest:
+        specs.append(("crests", 1.5))
     if sector:
-        specs.append(("sectors", 2.2))
+        specs.append(("sectors", 2.0))
     if style:
-        specs.append(("styles", 2.0))
+        specs.append(("styles", 1.8))
     cols = st.columns([w for _, w in specs])
     for col, (kind, _) in zip(cols, specs):
         with col:
@@ -73,6 +83,12 @@ def filter_toolbar(df: pd.DataFrame, *, bucket=True, sector=True, style=True):
                 st.multiselect("Primary bucket", ms.bucket_options(df),
                                key="buckets", placeholder="Primary bucket",
                                label_visibility="collapsed")
+            elif kind == "sides":
+                st.multiselect("Side", ms.side_options(df), key="sides",
+                               placeholder="Side", label_visibility="collapsed")
+            elif kind == "crests":
+                st.multiselect("Crest", ms.crest_options(df), key="crests",
+                               placeholder="Crest", label_visibility="collapsed")
             elif kind == "sectors":
                 st.multiselect("Sector", ms.sector_options(df), key="sectors",
                                placeholder="Sector", label_visibility="collapsed")
@@ -317,7 +333,9 @@ def view_performance(full: pd.DataFrame, perf_full: pd.DataFrame):
 
 
 def _performance_table(df: pd.DataFrame, sort_win: str):
-    cols = ["Ticker", "Name", "Primary Bucket", "Sector", "Last Price"] + perf.ALL_WINDOWS
+    cols = (["Ticker", "Name", "Primary Bucket", "Side", "Crest", "Last Price"]
+            + perf.ALL_WINDOWS)
+    cols = [c for c in cols if c in df.columns]
     view = df[cols].sort_values(by=sort_win, ascending=False, na_position="last")
     fmt = {"Last Price": cp.fmt_price}
     for w in perf.ALL_WINDOWS:
@@ -326,6 +344,8 @@ def _performance_table(df: pd.DataFrame, sort_win: str):
     styler = (view.style.format(fmt, na_rep=cp.DASH)
               .map(cp.return_bg, subset=perf.ALL_WINDOWS)
               .map(cp.bucket_cell_bg, subset=["Primary Bucket"])
+              .map(cp.side_cell_bg, subset=["Side"])
+              .map(cp.crest_cell_bg, subset=["Crest"])
               .set_properties(**{"font-size": "0.88rem"})
               .set_properties(subset=num_cols, **{"text-align": "right"}))
     st.dataframe(styler, width="stretch", hide_index=True, height=560)
@@ -378,7 +398,8 @@ def _fundamentals_table(full: pd.DataFrame, filtered_tickers: set):
             if c in df.columns and c not in selected_cols:
                 selected_cols.append(c)
 
-    base = ["Ticker", "Name", "Primary Bucket", "Sector"]
+    base = ["Ticker", "Name", "Primary Bucket", "Side", "Crest", "Sector"]
+    base = [c for c in base if c in df.columns]
     view = df[base + selected_cols].copy()
 
     # Verdict columns rendered as HTML chips/badges/stars -> use st.markdown table
@@ -401,6 +422,8 @@ def _fundamentals_table(full: pd.DataFrame, filtered_tickers: set):
 
     styler = (view.style.format(fmt, na_rep=cp.DASH)
               .map(cp.bucket_cell_bg, subset=["Primary Bucket"])
+              .map(cp.side_cell_bg, subset=["Side"])
+              .map(cp.crest_cell_bg, subset=["Crest"])
               .set_properties(**{"font-size": "0.86rem"}))
     st.dataframe(styler, width="stretch", hide_index=True, height=560)
     st.caption(f"{len(view)} names · {len(selected_cols)} metrics. "
@@ -433,8 +456,9 @@ def view_screener(full: pd.DataFrame, scores: pd.DataFrame):
                 unsafe_allow_html=True)
     filter_toolbar(full)
     filtered_tickers = set(apply_filters(full)["Ticker"])
-    st.caption("Adjust factor weights to re-rank the universe live by the "
-               "weighted composite.")
+    st.caption("Adjust factor weights to re-rank the universe; use the crest tilt "
+               "and 'sort by upside to FV' for timing-aware value — distinguishing "
+               "cheap-because-mispriced from cheap-because-the-cycle-is-turning.")
 
     cols = st.columns(len(fc.FACTOR_NAMES))
     weights = {}
@@ -442,26 +466,65 @@ def view_screener(full: pd.DataFrame, scores: pd.DataFrame):
         with col:
             weights[name] = st.slider(name, 0.0, 3.0, 1.0, 0.5, key=f"w_{name}")
 
+    # Timing-aware controls.
+    tcol = st.columns([1.4, 1.4, 1.2])
+    with tcol[0]:
+        tilt_crest = st.selectbox("Crest tilt", ["None"] + tm.CREST_ORDER,
+                                  index=0, key="screen_tilt")
+    with tcol[1]:
+        tilt_str = st.slider("Tilt strength", 0, 30, 10, 5, key="screen_tilt_str",
+                             disabled=(tilt_crest == "None"))
+    with tcol[2]:
+        sort_by = st.selectbox("Sort by", ["Composite", "Upside to FV"],
+                               index=0, key="screen_sort")
+
     df = scores[scores["Ticker"].isin(filtered_tickers)].copy()
     if df.empty:
         st.warning("No names match the current filters.")
         return
     df["Composite"] = fc.weighted_composite(df, weights)
-    df = df.sort_values("Composite", ascending=False, na_position="last")
+    # Crest tilt: add a flat bonus to the composite for the chosen crest layer.
+    if tilt_crest != "None" and "Crest" in df.columns:
+        df["Composite"] = df["Composite"] + (
+            (df["Crest"] == tilt_crest).astype(float) * float(tilt_str))
+        df["Composite"] = df["Composite"].clip(0, 100)
+
+    # Merge timing columns (upside_fv / value_trap / tier) from the full frame.
+    tcols_keep = ["Ticker", "valuation_tier", "value_trap", "upside_fv"]
+    df = df.merge(full[tcols_keep], on="Ticker", how="left")
+
+    if sort_by == "Upside to FV":
+        df = df.sort_values("upside_fv", ascending=False, na_position="last")
+    else:
+        df = df.sort_values("Composite", ascending=False, na_position="last")
+
+    n_trap = int(df["value_trap"].sum())
+    if n_trap:
+        st.caption(f"{n_trap} name(s) on value-trap watch in this set "
+                   "(amber 'watch' in the Trap column).")
 
     top = df.head(3)
-    tcols = st.columns(3)
-    for col, (_, r) in zip(tcols, top.iterrows()):
+    tcards = st.columns(3)
+    for i, (col, (_, r)) in enumerate(zip(tcards, top.iterrows())):
         with col:
-            cp.stat_card(f"#{list(top['Ticker']).index(r['Ticker'])+1} {r['Ticker']}",
-                         cp.fmt_score(r["Composite"]), r["Name"] or "")
+            cp.stat_card(f"#{i + 1} {r['Ticker']}", cp.fmt_score(r["Composite"]),
+                         r["Name"] or "")
 
     st.write("")
-    show = ["Ticker", "Name", "Sector"] + fc.FACTOR_NAMES + ["Composite"]
+    df["Trap"] = df["value_trap"].map(lambda b: "watch" if b else "")
+    show = (["Ticker", "Name", "Side", "Crest", "valuation_tier"]
+            + fc.FACTOR_NAMES + ["Composite", "upside_fv", "Trap"])
+    show = [c for c in show if c in df.columns]
     score_cols = fc.FACTOR_NAMES + ["Composite"]
-    styler = (df[show].style.format({c: cp.fmt_score for c in score_cols}, na_rep=cp.DASH)
+    view = df[show].rename(columns={"valuation_tier": "Tier", "upside_fv": "Upside FV"})
+    fmt = {c: cp.fmt_score for c in score_cols}
+    fmt["Upside FV"] = lambda v: cp.fmt_pct_frac(v)
+    styler = (view.style.format(fmt, na_rep=cp.DASH)
               .map(cp.score_bg, subset=score_cols)
-              .set_properties(**{"font-size": "0.88rem"}))
+              .map(cp.side_cell_bg, subset=["Side"])
+              .map(cp.crest_cell_bg, subset=["Crest"])
+              .map(cp.return_bg, subset=["Upside FV"])
+              .set_properties(**{"font-size": "0.86rem"}))
     st.dataframe(styler, width="stretch", hide_index=True, height=520)
 
 
@@ -588,6 +651,148 @@ def _bucket_drilldown(pf, sc, summary):
               .map(cp.score_bg, subset=factor_cols)
               .set_properties(**{"font-size": "0.86rem"}))
     st.dataframe(styler, width="stretch", hide_index=True, height=440)
+
+
+# ---------------------------------------------------------------------------
+# View: Capex Cycle (timing dashboard)
+# ---------------------------------------------------------------------------
+_ROTATION_LIVE = ["1W", "1M", "3M"]      # short windows from the price feed
+_ROTATION_MS = ["YTD", "1Y"]              # Morningstar trailing windows
+
+
+def view_capex_cycle(full: pd.DataFrame, perf_full: pd.DataFrame,
+                     scores: pd.DataFrame):
+    st.markdown('<div class="view-title">Capex Cycle — Side &times; Crest timing'
+                '</div>', unsafe_allow_html=True)
+    filter_toolbar(full, sector=False, style=False)
+    ft = set(apply_filters(full)["Ticker"])
+    fd = full[full["Ticker"].isin(ft)].reset_index(drop=True)
+    pf = perf_full[perf_full["Ticker"].isin(ft)].reset_index(drop=True)
+    if fd.empty:
+        st.warning("No names match the current filters.")
+        return
+
+    t_map, t_rot, t_board = st.tabs(
+        ["Crest x Side matrix", "Rotation tracker", "Layer leaderboard"])
+    with t_map:
+        _capex_matrix(fd)
+    with t_rot:
+        _rotation_tracker(pf)
+    with t_board:
+        _layer_leaderboard(fd, pf)
+
+
+def _capex_matrix(fd: pd.DataFrame):
+    st.caption("Where capital is concentrated: count, median 1Y return and "
+               "median forward P/E for each crest layer x side.")
+    mat = tm.crest_side_matrix(fd)
+    # Pivot to a readable grid with a combined cell string per (crest, side).
+    sides = tm.SIDE_ORDER
+    grid_rows = []
+    for crest in tm.CREST_ORDER:
+        row = {"Crest": crest}
+        for side in sides:
+            c = mat[(mat["Crest"] == crest) & (mat["Side"] == side)]
+            if len(c) and int(c["n"].iloc[0]) > 0:
+                n = int(c["n"].iloc[0])
+                m1y = c["median_1y"].iloc[0]
+                pe = c["median_fwd_pe"].iloc[0]
+                row[side] = (f"{n} names · 1Y "
+                             f"{cp.fmt_pct_unit(m1y)} · "
+                             f"P/E {cp.fmt_mult(pe)}")
+            else:
+                row[side] = cp.DASH
+        grid_rows.append(row)
+    grid = pd.DataFrame(grid_rows)
+    styler = (grid.style
+              .map(cp.crest_cell_bg, subset=["Crest"])
+              .set_properties(**{"font-size": "0.85rem"}))
+    st.dataframe(styler, width="stretch", hide_index=True)
+
+
+def _rotation_tracker(pf: pd.DataFrame):
+    st.caption("The timing signal: capital rotating OUT of late-crest INTO "
+               "early-crest shows up as early-crest short-window returns "
+               "exceeding late-crest.")
+    # Prefer live short windows; fall back to Morningstar if they're all empty.
+    live_cols = [w for w in _ROTATION_LIVE
+                 if w in pf.columns and pf[w].notna().any()]
+    use_cols = live_cols + [w for w in _ROTATION_MS if w in pf.columns]
+    if not live_cols:
+        st.info("Live short-window returns unavailable (price feed empty) — "
+                "showing Morningstar YTD/1Y only.")
+    mat = tm.rotation_table(pf, use_cols)
+    if mat.empty:
+        st.info("No return data for the rotation tracker.")
+        return
+    cp.heatmap(mat, list(mat.columns), pct_fraction=True)
+
+    # Computed direction caption — prefer the shortest live window available.
+    cap_window = (live_cols[1] if len(live_cols) > 1 else
+                  (live_cols[0] if live_cols else
+                   ("1Y" if "1Y" in pf.columns else None)))
+    cap = tm.rotation_caption(pf, cap_window) if cap_window else None
+    if cap:
+        label = "" if cap_window in _ROTATION_LIVE else " (Morningstar)"
+        st.markdown(f'<div class="section-title">{cap}{label}</div>',
+                    unsafe_allow_html=True)
+
+
+def _layer_leaderboard(fd: pd.DataFrame, pf: pd.DataFrame):
+    layer = st.selectbox("Crest layer", tm.CREST_ORDER,
+                         index=0, key="capex_layer")
+    sub = fd[fd["Crest"] == layer].copy()
+    if sub.empty:
+        st.info(f"No names in the {layer} layer for the current filters.")
+        return
+
+    # Pullback from 52w high: compute from FMP-stable history when available.
+    pulls, src_note = _pullbacks_from_high(sub["Ticker"].tolist())
+    sub["Pullback"] = sub["Ticker"].map(pulls)
+    sub["Fwd P/E"] = sub.apply(tm.effective_forward_pe, axis=1)
+    sub["Upside FV"] = sub["upside_fv"]
+    sub["Trap"] = sub["value_trap"].map(lambda b: "watch" if b else "")
+
+    cols = ["Ticker", "Name", "Side", "valuation_tier", "Fwd P/E", "Pullback",
+            "Total Return (1Y)", "Upside FV", "Trap"]
+    view = sub[cols].rename(columns={"valuation_tier": "Tier",
+                                     "Total Return (1Y)": "1Y"})
+    view = view.sort_values("Upside FV", ascending=False, na_position="last")
+    fmt = {"Fwd P/E": cp.fmt_mult,
+           "Pullback": lambda v: cp.fmt_pct_frac(v),
+           "1Y": lambda v: cp.fmt_pct_unit(v),
+           "Upside FV": lambda v: cp.fmt_pct_frac(v)}
+    styler = (view.style.format(fmt, na_rep=cp.DASH)
+              .map(cp.side_cell_bg, subset=["Side"])
+              .map(cp.return_bg, subset=["Pullback", "Upside FV"])
+              .set_properties(**{"font-size": "0.86rem"}))
+    st.dataframe(styler, width="stretch", hide_index=True, height=480)
+    st.caption(src_note + "  ·  'watch' = value-trap (low fwd P/E + early-crest "
+               "+ extended 1Y).")
+
+
+def _pullbacks_from_high(tickers: list) -> tuple:
+    """Map ticker -> (Last - 52wHigh)/52wHigh using FMP-stable history if any.
+
+    Returns ``(mapping, note)``. When no history is available the mapping is
+    empty and the note says so (the column then shows '—').
+    """
+    pulls: dict = {}
+    have_hist = False
+    for t in tickers[:60]:  # cap the per-render history fetches
+        h = service.get_history_result(t)
+        s = h["series"]
+        if s is None or s.empty:
+            continue
+        have_hist = True
+        last = float(s.iloc[-1])
+        hi = float(s.tail(252).max()) if len(s) >= 5 else float(s.max())
+        if hi:
+            pulls[t] = last / hi - 1.0
+    note = ("Pullback = (last - 52w high) / 52w high from price history."
+            if have_hist else
+            "Pullback needs price history (feed empty) — showing 1Y instead.")
+    return pulls, note
 
 
 # ---------------------------------------------------------------------------
@@ -882,10 +1087,14 @@ def view_detail(full: pd.DataFrame, perf_full: pd.DataFrame,
     rating = row.get("Morningstar Rating for Stocks")
     moat = row.get("Economic Moat")
     upside = row.get("upside_pct")
+    trap_chip = (cp.value_trap_chip(tm.value_trap_reason(row))
+                 if row.get("value_trap") else "")
     head = (
         f'<div class="detail-head"><div class="name">{row.get("Name") or ticker} '
         f'<span class="tk">{ticker}</span></div>'
-        f'<div class="meta">{cp.bucket_chip(row.get("Primary Bucket"))} &nbsp; '
+        f'<div class="meta">{cp.bucket_chip(row.get("Primary Bucket"))} '
+        f'{cp.side_chip(row.get("Side"))} {cp.crest_chip(row.get("Crest"))} '
+        f'{trap_chip} &nbsp; '
         f'{row.get("Sector") or ""} · {row.get("Stock Style Box") or ""} &nbsp; '
         f'<span class="stars">{cp.fmt_stars(rating)}</span> &nbsp; '
         f'{cp.moat_chip(moat)}</div></div>'
@@ -901,6 +1110,29 @@ def view_detail(full: pd.DataFrame, perf_full: pd.DataFrame,
         cp.stat_card("Fair Value", cp.fmt_price(fv))
     with cinfo[2]:
         cp.stat_card("Implied upside", cp.fmt_pct_frac(upside), sign=upside)
+
+    # --- Capex cycle position card ---
+    st.markdown('<div class="section-title">Capex cycle position</div>',
+                unsafe_allow_html=True)
+    cc = st.columns(4)
+    with cc[0]:
+        cp.stat_card("Side", row.get("Side") or cp.DASH)
+    with cc[1]:
+        cp.stat_card("Crest", f'{row.get("Crest") or cp.DASH}-crest'
+                     if row.get("Crest") else cp.DASH)
+    with cc[2]:
+        cp.stat_card("Valuation tier", row.get("valuation_tier") or cp.DASH)
+    with cc[3]:
+        cp.stat_card("Upside to FV", cp.fmt_pct_frac(row.get("upside_fv")),
+                     sign=row.get("upside_fv"))
+    if row.get("value_trap"):
+        st.markdown(
+            f'<div class="muted-note" style="color:{styles.TRAP_AMBER};">'
+            f'Value-trap watch — {cp._esc(tm.value_trap_reason(row))}</div>',
+            unsafe_allow_html=True)
+    if row.get("Crest Rationale"):
+        st.markdown(f'<div class="muted-note">{cp._esc(row["Crest Rationale"])}'
+                    f'</div>', unsafe_allow_html=True)
 
     # --- Price chart with window selector ---
     st.markdown('<div class="section-title">Price</div>', unsafe_allow_html=True)
@@ -1005,7 +1237,7 @@ def _detail_fundamentals(row: pd.Series):
 # Main
 # ---------------------------------------------------------------------------
 NAV_ITEMS = ["Performance", "Fundamentals & Factors", "Screener", "Buckets",
-             "News & Filings", "Stock Detail"]
+             "Capex Cycle", "News & Filings", "Stock Detail"]
 
 
 def main():
@@ -1031,6 +1263,10 @@ def main():
         st.error(str(e))
         st.stop()
 
+    # Capex-cycle timing columns (valuation_tier / value_trap / upside_fv) on the
+    # full frame so every view can read them.
+    full = tm.add_timing_columns(full)
+
     # Horizontal text-only nav (no emoji), enterprise styling, active underline.
     selected = option_menu(
         menu_title=None, options=NAV_ITEMS, orientation="horizontal",
@@ -1052,6 +1288,8 @@ def main():
     scores.insert(1, "Name", merged["Name"].values)
     scores.insert(2, "Primary Bucket", merged["Primary Bucket"].values)
     scores.insert(3, "Sector", merged["Sector"].values)
+    scores.insert(4, "Side", merged["Side"].values)
+    scores.insert(5, "Crest", merged["Crest"].values)
 
     # Render only the active view (option_menu, unlike st.tabs, renders one).
     if selected == "Performance":
@@ -1062,6 +1300,8 @@ def main():
         view_screener(full, scores)
     elif selected == "Buckets":
         view_buckets(full, perf_full, scores)
+    elif selected == "Capex Cycle":
+        view_capex_cycle(full, perf_full, scores)
     elif selected == "News & Filings":
         view_news(full, perf_full, scores)
     elif selected == "Stock Detail":

@@ -37,6 +37,12 @@ BUCKET_COLORS = {
     "Unclassified": "#94A3B8",
 }
 
+# Capex-cycle palettes (Crest layer + Side).
+CREST_COLORS = {"Early": "#0D9488", "Mid": "#64748B", "Late": "#CA8A04"}
+SIDE_COLORS = {"Supplier": "#2563EB", "Demand": "#7C3AED",
+               "Hyperscaler": "#1E3A8A", "Unknown": "#94A3B8"}
+TRAP_AMBER = "#CA8A04"
+
 _CSS = f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
