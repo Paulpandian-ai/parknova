@@ -99,6 +99,21 @@ filter and grouping dimension across the app, rendered as colored chips.
   upside; live Plotly price chart with a window selector; the 9 return windows as
   stat cards; a factor radar vs the universe median; grouped fundamentals; and a
   compact News & Filings pane.
+- **Thesis** (conviction-weighted decision log) — pick a ticker, see an
+  **auto-captured evidence snapshot** (factor radar + composite, valuation /
+  value-trap, crest/side chips, returns — reusing `core/factors.py` and
+  `core/timing.py`, never recomputed), then write a structured thesis (stance,
+  conviction 1-10, horizon, intended position size %, bull/bear, valuation view,
+  catalysts, risks, crest note, defined exit). Saving appends a **timestamped
+  journal entry that freezes the evidence snapshot**, so a **conviction-over-time
+  chart** renders and you can see months later whether the call was right.
+  Records persist to `.cache/theses/{ticker}.json` via `core/store.py` (local, or
+  S3 when `PARKNOVA_S3_BUCKET` is set). A **Portfolio rollup** lists every saved
+  thesis (stance / conviction / size % / live upside-to-FV / crest / value-trap),
+  sums intended sizes (flags > 100%), and groups exposure by crest layer. An
+  **Export thesis brief** button produces a paste-ready JSON for drafting in
+  Claude (Max plan) via the `skills/thesis-drafter` skill — import the result
+  back; no paid API call.
 
 ## Factor methodology (`core/factors.py`, pure & testable)
 

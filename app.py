@@ -15,6 +15,7 @@ from streamlit_option_menu import option_menu
 from core import factors as fc
 from core import performance as perf
 from core import synthesis as synth
+from core import thesis as thx
 from core import timing as tm
 from data import anthropic_client as anth
 from data import morningstar as ms
@@ -1350,10 +1351,286 @@ def _detail_fundamentals(row: pd.Series):
 
 
 # ---------------------------------------------------------------------------
+# View: Thesis (structured, conviction-weighted decision log per ticker)
+# ---------------------------------------------------------------------------
+def _imported_for_ticker(ticker: str) -> list:
+    """Imported filing analyses whose ticker matches (for the evidence snapshot)."""
+    out = []
+    for obj in service.get_imported_analyses().values():
+        if str(obj.get("ticker", "")).upper() == ticker.upper():
+            out.append(obj)
+    return out
+
+
+def _capture_for(ticker: str, full: pd.DataFrame, perf_full: pd.DataFrame,
+                 scores: pd.DataFrame) -> dict:
+    """Build a frozen evidence snapshot reusing existing factor/timing frames."""
+    def _row(df):
+        sub = df[df["Ticker"] == ticker]
+        return sub.iloc[0] if not sub.empty else None
+    return thx.capture_evidence(ticker, _row(full), _row(scores),
+                                _row(perf_full), _imported_for_ticker(ticker))
+
+
+def view_thesis(full: pd.DataFrame, perf_full: pd.DataFrame, scores: pd.DataFrame):
+    st.markdown('<div class="view-title">Thesis — conviction-weighted decision '
+                'log</div>', unsafe_allow_html=True)
+    t_edit, t_roll = st.tabs(["Editor & journal", "Portfolio rollup"])
+    with t_edit:
+        _thesis_editor(full, perf_full, scores)
+    with t_roll:
+        _thesis_rollup(full)
+
+
+def _thesis_editor(full: pd.DataFrame, perf_full: pd.DataFrame,
+                   scores: pd.DataFrame):
+    options = full["Ticker"].tolist()
+    labels = dict(zip(full["Ticker"], full["Name"]))
+    default = st.session_state.get("detail_ticker")
+    idx = options.index(default) if default in options else 0
+    ticker = st.selectbox("Ticker", options, index=idx,
+                          format_func=lambda t: f"{t} · {labels.get(t, '')}",
+                          key="thesis_ticker")
+
+    evidence = _capture_for(ticker, full, perf_full, scores)
+    row = full[full["Ticker"] == ticker].iloc[0]
+
+    # --- Evidence panel (read-only, auto-pulled) ---
+    st.markdown('<div class="section-title">Evidence (auto-captured)</div>',
+                unsafe_allow_html=True)
+    chips = (cp.bucket_chip(row.get("Primary Bucket")) + " "
+             + cp.side_chip(row.get("Side")) + " " + cp.crest_chip(row.get("Crest"))
+             + " " + (cp.value_trap_chip(tm.value_trap_reason(row))
+                      if row.get("value_trap") else ""))
+    st.markdown(f'<div class="detail-head"><div class="meta">{chips}</div></div>',
+                unsafe_allow_html=True)
+    val = evidence["valuation"]
+    ec = st.columns(4)
+    with ec[0]:
+        cp.stat_card("Last / Fair", f'{cp.fmt_price(val["last_price"])} / '
+                     f'{cp.fmt_price(val["fair_value"])}')
+    with ec[1]:
+        cp.stat_card("Upside to FV", cp.fmt_pct_frac(val["upside_fv"]),
+                     sign=val["upside_fv"])
+    with ec[2]:
+        cp.stat_card("Fwd P/E · Tier", f'{cp.fmt_mult(val["forward_pe"])} · '
+                     f'{val["valuation_tier"] or cp.DASH}')
+    with ec[3]:
+        comp = evidence["factors"].get("Composite")
+        cp.stat_card("Factor composite", cp.fmt_score(comp))
+
+    ecol1, ecol2 = st.columns([1, 1])
+    with ecol1:
+        fdict = {n: evidence["factors"].get(n) for n in fc.FACTOR_NAMES}
+        med = {n: scores[n].median() for n in fc.FACTOR_NAMES if n in scores}
+        if any(v is not None for v in fdict.values()):
+            cp.factor_radar(fdict, med)
+    with ecol2:
+        ret = evidence["returns"]
+        rc = st.columns(3)
+        for i, w in enumerate(["1M", "6M", "1Y", "3Y", "5Y", "Today"]):
+            with rc[i % 3]:
+                cp.stat_card(w, cp.fmt_pct_frac(ret.get(w)), sign=ret.get(w))
+        f = evidence["filings"]
+        if f["imported_count"]:
+            st.caption(f"{f['imported_count']} imported filing analysis(es)."
+                       + (f" Latest net read: {f['latest_net_read']}"
+                          if f["latest_net_read"] else ""))
+
+    # --- Seed editor state from the saved record (or import) ---
+    record = thx.read_thesis(ticker)
+    _seed_thesis_state(ticker, record)
+
+    # --- Import drafted thesis (zero-cost AI path) ---
+    with st.expander("Draft with Claude (export / import — no paid API)"):
+        st.caption("Export the evidence brief, draft the thesis in Claude (Max "
+                   "plan) with a thesis-drafter skill, then paste the JSON back.")
+        st.download_button("Export thesis brief (JSON)",
+                           data=thx.export_brief(ticker, evidence,
+                                                 _current_from_state(ticker)),
+                           file_name=f"{ticker}_thesis_brief.json",
+                           mime="application/json", key=f"exp_{ticker}")
+        drafted = st.text_area("Paste drafted thesis JSON to import",
+                               key=f"imp_text_{ticker}", height=80)
+        if st.button("Import drafted thesis", key=f"imp_btn_{ticker}"):
+            parsed = thx.parse_imported_thesis(drafted)
+            if parsed is None:
+                st.warning("Could not parse a thesis from that JSON.")
+            else:
+                _apply_current_to_state(ticker, parsed)
+                st.success("Imported — review and Save to record it.")
+                st.rerun()
+
+    # --- Thesis editor ---
+    st.markdown('<div class="section-title">Thesis</div>', unsafe_allow_html=True)
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.selectbox("Stance", thx.STANCES, key=f"th_stance_{ticker}")
+    with c2:
+        st.slider("Conviction (1-10)", 1, 10, key=f"th_conviction_{ticker}")
+    with c3:
+        st.number_input("Position size (% of portfolio)", 0.0, 100.0, step=0.5,
+                        key=f"th_size_{ticker}")
+    st.text_input("Time horizon", key=f"th_horizon_{ticker}",
+                  placeholder="e.g. 18-24 months")
+    bc1, bc2 = st.columns(2)
+    with bc1:
+        st.text_area("Bull case", key=f"th_bull_{ticker}", height=110)
+        st.text_area("Catalysts (one per line)", key=f"th_cat_{ticker}", height=90)
+        st.text_area("Valuation view", key=f"th_val_{ticker}", height=90)
+    with bc2:
+        st.text_area("Bear case", key=f"th_bear_{ticker}", height=110)
+        st.text_area("Risks (one per line)", key=f"th_risk_{ticker}", height=90)
+        st.text_area("Crest note (capex-cycle timing call)",
+                     key=f"th_crest_{ticker}", height=90)
+    st.text_area("Defined exit (the condition that proves you wrong)",
+                 key=f"th_exit_{ticker}", height=70)
+    note = st.text_input("Journal note for this save", key=f"th_note_{ticker}",
+                         placeholder="What changed since last entry?")
+
+    if st.button("Save thesis + journal entry", type="primary",
+                 key=f"th_save_{ticker}"):
+        cur = _current_from_state(ticker)
+        fresh = _capture_for(ticker, full, perf_full, scores)  # freeze at save
+        thx.save_thesis(ticker, cur, fresh, note=note)
+        st.success(f"Saved {ticker} thesis and appended a journal entry.")
+        st.rerun()
+
+    # --- Journal timeline + conviction chart ---
+    record = thx.read_thesis(ticker)
+    if record and record.get("journal"):
+        st.markdown('<div class="section-title">Conviction over time</div>',
+                    unsafe_allow_html=True)
+        cp.conviction_chart(thx.conviction_history(record))
+        st.markdown('<div class="section-title">Journal</div>',
+                    unsafe_allow_html=True)
+        _render_journal(record)
+    else:
+        st.caption("No journal yet — save a thesis to begin the record.")
+
+
+def _seed_thesis_state(ticker: str, record) -> None:
+    """Initialise editor widget state from a saved record (once per ticker)."""
+    cur = (record or {}).get("current") or thx.empty_current()
+    sentinel = f"_th_seeded_{ticker}"
+    if st.session_state.get(sentinel):
+        return
+    _apply_current_to_state(ticker, cur)
+    st.session_state[sentinel] = True
+
+
+def _apply_current_to_state(ticker: str, cur: dict) -> None:
+    base = thx.empty_current()
+    base.update({k: v for k, v in (cur or {}).items() if v is not None})
+    st.session_state[f"th_stance_{ticker}"] = (
+        base["stance"] if base["stance"] in thx.STANCES else "Watch")
+    st.session_state[f"th_conviction_{ticker}"] = int(base.get("conviction") or 5)
+    st.session_state[f"th_size_{ticker}"] = float(base.get("position_size_pct") or 0.0)
+    st.session_state[f"th_horizon_{ticker}"] = base.get("time_horizon") or ""
+    st.session_state[f"th_bull_{ticker}"] = base.get("bull_case") or ""
+    st.session_state[f"th_bear_{ticker}"] = base.get("bear_case") or ""
+    st.session_state[f"th_val_{ticker}"] = base.get("valuation_view") or ""
+    st.session_state[f"th_crest_{ticker}"] = base.get("crest_note") or ""
+    st.session_state[f"th_exit_{ticker}"] = base.get("defined_exit") or ""
+    st.session_state[f"th_cat_{ticker}"] = "\n".join(base.get("catalysts") or [])
+    st.session_state[f"th_risk_{ticker}"] = "\n".join(base.get("risks") or [])
+
+
+def _current_from_state(ticker: str) -> dict:
+    def g(field, default=""):
+        return st.session_state.get(f"th_{field}_{ticker}", default)
+
+    def lines(field):
+        return [ln.strip() for ln in (g(field) or "").splitlines() if ln.strip()]
+    return {
+        "stance": g("stance", "Watch"),
+        "conviction": int(g("conviction", 5) or 5),
+        "time_horizon": g("horizon"),
+        "position_size_pct": float(g("size", 0.0) or 0.0),
+        "bull_case": g("bull"), "bear_case": g("bear"),
+        "valuation_view": g("val"), "catalysts": lines("cat"),
+        "risks": lines("risk"), "crest_note": g("crest"),
+        "defined_exit": g("exit"),
+    }
+
+
+def _render_journal(record: dict) -> None:
+    for e in reversed(record.get("journal", [])):
+        ts = str(e.get("ts", ""))[:16].replace("T", " ")
+        snap = e.get("evidence_snapshot") or {}
+        up = (snap.get("valuation") or {}).get("upside_fv")
+        comp = (snap.get("factors") or {}).get("Composite")
+        meta = (f"upside {cp.fmt_pct_frac(up)} · composite {cp.fmt_score(comp)}")
+        st.markdown(
+            f'<div class="news-item"><b>{e.get("stance") or ""}</b> · conviction '
+            f'{e.get("conviction")} · size {e.get("position_size_pct")}%'
+            f'<div class="news-meta">{ts} · {cp._esc(e.get("note") or "")}</div>'
+            f'<div class="news-meta">{meta}</div></div>', unsafe_allow_html=True)
+
+
+def _thesis_rollup(full: pd.DataFrame) -> None:
+    records = thx.list_theses()
+    if not records:
+        st.info("No theses saved yet. Write one in the Editor tab.")
+        return
+    live = full.set_index("Ticker")
+    rows = []
+    for r in records:
+        tk = r["ticker"]
+        cur = r.get("current") or {}
+        lr = live.loc[tk] if tk in live.index else None
+        rows.append({
+            "Ticker": tk,
+            "Stance": cur.get("stance"),
+            "Conviction": cur.get("conviction"),
+            "Size %": cur.get("position_size_pct"),
+            "Crest": (lr.get("Crest") if lr is not None else None),
+            "Upside FV": (lr.get("upside_fv") if lr is not None else None),
+            "Value-trap": ("watch" if (lr is not None and lr.get("value_trap"))
+                           else ""),
+            "Updated": str(r.get("updated_at", ""))[:10],
+        })
+    df = pd.DataFrame(rows)
+    total = pd.to_numeric(df["Size %"], errors="coerce").sum()
+
+    sc = st.columns(3)
+    with sc[0]:
+        cp.stat_card("Theses", str(len(df)))
+    with sc[1]:
+        cp.stat_card("Total intended size", f"{total:.1f}%",
+                     sign=(1 if total <= 100 else -1))
+    with sc[2]:
+        cp.stat_card("Avg conviction",
+                     cp.fmt_ratio(pd.to_numeric(df["Conviction"],
+                                                errors="coerce").mean()))
+    if total > 100:
+        st.warning(f"Intended position sizes sum to {total:.1f}% (> 100%).")
+
+    fmt = {"Upside FV": lambda v: cp.fmt_pct_frac(v),
+           "Size %": lambda v: f"{v:.1f}%" if pd.notna(v) else cp.DASH,
+           "Conviction": lambda v: f"{int(v)}" if pd.notna(v) else cp.DASH}
+    styler = (df.style.format(fmt, na_rep=cp.DASH)
+              .map(cp.crest_cell_bg, subset=["Crest"])
+              .map(cp.return_bg, subset=["Upside FV"])
+              .set_properties(**{"font-size": "0.88rem"}))
+    st.dataframe(styler, width="stretch", hide_index=True)
+
+    # Group by crest layer — thesis exposure across the capex cycle.
+    st.markdown('<div class="section-title">Intended exposure by crest layer'
+                '</div>', unsafe_allow_html=True)
+    grp = (df.assign(_s=pd.to_numeric(df["Size %"], errors="coerce"))
+           .groupby(df["Crest"].fillna("Unknown"))["_s"].sum())
+    gcols = st.columns(max(len(grp), 1))
+    for col, (layer, sz) in zip(gcols, grp.items()):
+        with col:
+            cp.stat_card(str(layer), f"{sz:.1f}%")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 NAV_ITEMS = ["Performance", "Fundamentals & Factors", "Screener", "Buckets",
-             "Capex Cycle", "News & Filings", "Stock Detail"]
+             "Capex Cycle", "News & Filings", "Stock Detail", "Thesis"]
 
 
 def main():
@@ -1428,6 +1705,8 @@ def main():
         view_news(full, perf_full, scores)
     elif selected == "Stock Detail":
         view_detail(full, perf_full, scores)
+    elif selected == "Thesis":
+        view_thesis(full, perf_full, scores)
 
 
 if __name__ == "__main__":

@@ -395,6 +395,26 @@ def index_lines_chart(wide: pd.DataFrame, color_map: dict, title: str = "",
     st.plotly_chart(fig, width="stretch")
 
 
+def conviction_chart(df: pd.DataFrame):
+    """Conviction (1-10) over time from a thesis journal ({ts, conviction})."""
+    if df is None or df.empty:
+        st.info("No journal entries yet — save a thesis to start the timeline.")
+        return
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=df["ts"], y=df["conviction"], mode="lines+markers",
+        line=dict(color=styles.PRIMARY, width=2),
+        marker=dict(size=7, color=styles.PRIMARY),
+        hovertemplate="%{x|%b %d, %Y}<br>conviction %{y}<extra></extra>",
+        name="Conviction"))
+    fig.update_layout(
+        template="plotly_white", height=240, margin=dict(l=10, r=10, t=10, b=10),
+        xaxis=dict(showgrid=False),
+        yaxis=dict(gridcolor=styles.BORDER, title="Conviction", range=[0, 10]),
+        hovermode="x unified")
+    st.plotly_chart(fig, width="stretch")
+
+
 def spread_line_chart(spread: pd.Series, title: str = ""):
     """Single Early-minus-Late spread line, zero-referenced, signed fill."""
     if spread is None or spread.dropna().empty:
