@@ -697,14 +697,105 @@ def view_capex_cycle(full: pd.DataFrame, perf_full: pd.DataFrame,
         st.warning("No names match the current filters.")
         return
 
-    t_map, t_rot, t_board = st.tabs(
-        ["Crest x Side matrix", "Rotation tracker", "Layer leaderboard"])
+    t_map, t_rot, t_trend, t_board = st.tabs(
+        ["Crest x Side matrix", "Rotation tracker", "Crest trends",
+         "Layer leaderboard"])
     with t_map:
         _capex_matrix(fd)
     with t_rot:
         _rotation_tracker(pf)
+    with t_trend:
+        _crest_trends(full)
     with t_board:
         _layer_leaderboard(fd, pf)
+
+
+_TREND_WINDOWS = {"3M": pd.DateOffset(months=3), "6M": pd.DateOffset(months=6),
+                  "1Y": pd.DateOffset(years=1), "2Y": pd.DateOffset(years=2),
+                  "Max": None}
+
+
+def _crest_trends(full: pd.DataFrame):
+    from core import crest_index as ci
+
+    st.markdown(
+        '<div class="news-item" style="border-color:#CA8A04;background:#FEFCE8;">'
+        '<b>Backcast caveat.</b> Indices use the <b>current (2026) crest '
+        'classification</b> applied to historical prices — i.e. "how would '
+        "today's crest groups have moved\", not a contemporaneous read. Names "
+        'enter each index only on dates they have real price history (watch the '
+        'constituent counts); the recent window (2024→present) is where the '
+        'signal is meaningful.</div>', unsafe_allow_html=True)
+
+    ctl = st.columns([1.2, 1.4, 1.4])
+    with ctl[0]:
+        win = st.selectbox("Window", list(_TREND_WINDOWS.keys()), index=2,
+                           key="trend_win")
+    with ctl[1]:
+        gtype = st.radio("Group", ["Crest (Early/Mid/Late)", "Side (Supply/Demand)"],
+                         horizontal=True, key="trend_group")
+    with ctl[2]:
+        if st.button("Rebuild indices", width="stretch", key="rebuild_idx"):
+            with st.spinner("Rebuilding crest/side indices from price history…"):
+                bar = st.progress(0.0)
+                service.get_crest_indices(
+                    full, force=True,
+                    progress=lambda f, t: bar.progress(f, text=f"History… {t}"))
+                bar.empty()
+            st.rerun()
+
+    if not (service.has_api_key() or service.has_finnhub()):
+        st.info("Set FMP_API_KEY (or FINNHUB_API_KEY) to build price-based indices.")
+        return
+
+    bar = st.progress(0.0, text="Loading crest/side indices…")
+    res = service.get_crest_indices(
+        full, force=False,
+        progress=lambda f, t: bar.progress(f, text=f"History… {t}"))
+    bar.empty()
+    idx = pd.DataFrame(res["records"])
+    if idx.empty:
+        st.warning("No index data — price history unavailable for the universe.")
+        return
+    idx["date"] = pd.to_datetime(idx["date"])
+
+    group_type = "crest" if gtype.startswith("Crest") else "side"
+    color_map = styles.CREST_COLORS if group_type == "crest" else styles.SIDE_COLORS
+    wide_full = ci.pivot_levels(idx, group_type)
+    counts = ci.constituent_counts(idx, group_type)
+    if wide_full.empty:
+        st.warning("No series for this group.")
+        return
+
+    # Re-rebase to 100 at the start of the selected window.
+    off = _TREND_WINDOWS[win]
+    start = (wide_full.index.max() - off) if off is not None else None
+    wide = ci.window_rebased(wide_full, start)
+    counts_w = counts[counts.index >= start] if start is not None else counts
+
+    asof = (res.get("as_of") or "")[:10]
+    avail = f"{wide_full.index.min():%Y-%m-%d} → {wide_full.index.max():%Y-%m-%d}"
+    st.caption(f"Rebased to 100 at window start · available history {avail} · "
+               f"as of {asof}{' · rebuilt' if res.get('rebuilt') else ''}")
+
+    cp.index_lines_chart(wide, color_map,
+                         title=f"{group_type.title()} indices ({win})")
+
+    # Computed rotation read.
+    if group_type == "crest":
+        read = ci.rotation_read(wide, "Early", "Late")
+        if read:
+            st.markdown(f'<div class="section-title">Over {win}: {read}</div>',
+                        unsafe_allow_html=True)
+        st.markdown('<div class="section-title">Early − Late spread (rotation '
+                    'signal)</div>', unsafe_allow_html=True)
+        cp.spread_line_chart(ci.spread_series(wide, "Early", "Late"))
+
+    st.markdown('<div class="section-title">Constituents per group over time'
+                '</div>', unsafe_allow_html=True)
+    st.caption("Thin counts = backcast-heavy / pre-IPO; thicker = more real "
+               "history backing the index.")
+    cp.constituent_count_chart(counts_w, color_map)
 
 
 def _capex_matrix(fd: pd.DataFrame):

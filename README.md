@@ -62,7 +62,15 @@ filter and grouping dimension across the app, rendered as colored chips.
   the "single-digit memory at the cycle top" signature). Side/Crest are filters
   and chips across every data view and Stock Detail; the Screener supports
   timing-aware value (crest tilt + sort by upside-to-fair-value, value-trap
-  flagged).
+  flagged). A **Crest trends** tab charts rebased-to-100 equal-weighted return
+  **indices** per crest layer (Early/Mid/Late) and per side (Supplier/Demand/
+  Hyperscaler) over a selectable window, with a computed rotation caption, the
+  **Early − Late spread** as a single tracked signal, a constituent-count strip,
+  and a prominent **backcast caveat** (indices apply the *current* 2026 crest
+  labels to historical prices; names enter only on dates they have real history).
+  Indices are built once from FMP-stable history (`core/crest_index.py`),
+  persisted via `core/store.py` (local, or S3 when `PARKNOVA_S3_BUCKET` is set),
+  refreshed daily, with a manual **Rebuild indices** button.
 - **News & Filings** — for a selected ticker: a deterministic "At a glance"
   digest (news sentiment tally, filing counts 30/90d, net 90-day insider $, top
   institutional changes, implied upside), an optional AI summary, then tabs for

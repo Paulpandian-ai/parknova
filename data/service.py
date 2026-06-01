@@ -22,6 +22,9 @@ from data.fmp_client import FMPClient, FMPError
 
 logger = logging.getLogger("parknova.service")
 
+CREST_INDEX_KEY = "indices/crest_index.json"
+CREST_INDEX_MAX_AGE = 86_400  # 1 day
+
 QUOTE_TTL = 15           # near-real-time, but don't hammer
 HISTORY_TTL = 900        # 15 min
 MOMENTUM_TTL = 900       # back-compat alias
@@ -375,6 +378,51 @@ def clear_live_caches() -> None:
     get_institutional_holders.clear()
     get_insider_trades.clear()
     get_sec_filings.clear()
+
+
+# ---------------------------------------------------------------------------
+# Crest / Side return indices — built from the (broader) per-ticker history,
+# persisted via core.store so the series accrues and loads fast.
+# ---------------------------------------------------------------------------
+def get_crest_indices(classification: pd.DataFrame, force: bool = False,
+                      progress=None) -> dict:
+    """Return ``{"records": [...], "as_of": iso, "rebuilt": bool}``.
+
+    Uses a stored series when it is < 1 day old (unless ``force``); otherwise
+    rebuilds from FMP-stable history (reusing the cached per-ticker fetch) and
+    persists it. ``records`` is the tidy long-form index (date as ISO string).
+    """
+    from core import crest_index, store
+
+    if not force:
+        age = store.age_seconds(CREST_INDEX_KEY)
+        if age is not None and age < CREST_INDEX_MAX_AGE:
+            cached = store.load(CREST_INDEX_KEY)
+            if cached:
+                return {"records": cached, "as_of": store.as_of(CREST_INDEX_KEY),
+                        "rebuilt": False}
+
+    tickers = classification["Ticker"].tolist()
+    prices: dict = {}
+    total = len(tickers)
+    for i, t in enumerate(tickers):
+        s = get_history_result(t)["series"]   # cached single fetch per ticker
+        if s is not None and not s.empty:
+            prices[t] = s
+        if progress and total:
+            progress((i + 1) / total, t)
+
+    df = crest_index.build_indices(
+        prices, classification[["Ticker", "Crest", "Side"]])
+    records = []
+    if not df.empty:
+        tmp = df.copy()
+        tmp["date"] = pd.to_datetime(tmp["date"]).dt.strftime("%Y-%m-%d")
+        records = tmp.to_dict("records")
+    store.save(CREST_INDEX_KEY, records)
+    from core import store as _store
+    return {"records": records, "as_of": _store.as_of(CREST_INDEX_KEY),
+            "rebuilt": True}
 
 
 # ---------------------------------------------------------------------------

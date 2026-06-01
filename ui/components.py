@@ -368,6 +368,75 @@ def grouped_factor_bars(names: List[str], group_vals: List[float],
     st.plotly_chart(fig, width="stretch")
 
 
+def index_lines_chart(wide: pd.DataFrame, color_map: dict, title: str = "",
+                      rebased: bool = True):
+    """Multi-line index chart (cols = groups), colored per ``color_map``."""
+    if wide is None or wide.empty:
+        st.info("No index data for this window.")
+        return
+    fig = go.Figure()
+    for col in wide.columns:
+        fig.add_trace(go.Scatter(
+            x=wide.index, y=wide[col], mode="lines", name=str(col),
+            line=dict(color=color_map.get(str(col), styles.MUTED), width=2),
+            hovertemplate="%{x|%b %d, %Y}<br>" + str(col) + " %{y:.1f}<extra></extra>",
+        ))
+    if rebased:
+        fig.add_hline(y=100, line_dash="dot", line_color=styles.BORDER)
+    fig.update_layout(
+        template="plotly_white", height=380, title=title,
+        margin=dict(l=10, r=10, t=30, b=10),
+        xaxis=dict(showgrid=False),
+        yaxis=dict(gridcolor=styles.BORDER,
+                   title="Index (rebased = 100)" if rebased else "Index"),
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    st.plotly_chart(fig, width="stretch")
+
+
+def spread_line_chart(spread: pd.Series, title: str = ""):
+    """Single Early-minus-Late spread line, zero-referenced, signed fill."""
+    if spread is None or spread.dropna().empty:
+        st.info("Spread unavailable (need both layers in this window).")
+        return
+    s = spread.dropna()
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=s.index, y=s.values, mode="lines",
+        line=dict(color=styles.PRIMARY, width=2), fill="tozeroy",
+        fillcolor="rgba(37,99,235,0.08)",
+        hovertemplate="%{x|%b %d, %Y}<br>spread %{y:.1f}<extra></extra>",
+        name=s.name or "spread"))
+    fig.add_hline(y=0, line_dash="dot", line_color=styles.MUTED)
+    fig.update_layout(
+        template="plotly_white", height=260, title=title,
+        margin=dict(l=10, r=10, t=30, b=10),
+        xaxis=dict(showgrid=False),
+        yaxis=dict(gridcolor=styles.BORDER, title="Early − Late (index pts)"),
+        hovermode="x unified")
+    st.plotly_chart(fig, width="stretch")
+
+
+def constituent_count_chart(counts: pd.DataFrame, color_map: dict):
+    """Thin area lines showing how many names back each group over time."""
+    if counts is None or counts.empty:
+        return
+    fig = go.Figure()
+    for col in counts.columns:
+        fig.add_trace(go.Scatter(
+            x=counts.index, y=counts[col], mode="lines", name=str(col),
+            line=dict(color=color_map.get(str(col), styles.MUTED), width=1.5),
+            hovertemplate="%{x|%b %d, %Y}<br>" + str(col) + " %{y} names<extra></extra>",
+        ))
+    fig.update_layout(
+        template="plotly_white", height=200, margin=dict(l=10, r=10, t=8, b=10),
+        xaxis=dict(showgrid=False),
+        yaxis=dict(gridcolor=styles.BORDER, title="Constituents", rangemode="tozero"),
+        hovermode="x unified", showlegend=False)
+    st.plotly_chart(fig, width="stretch")
+
+
 # ---------------------------------------------------------------------------
 # News feed
 # ---------------------------------------------------------------------------
