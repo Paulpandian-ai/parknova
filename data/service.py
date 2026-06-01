@@ -64,48 +64,69 @@ def has_finnhub() -> bool:
 # History: prefer FMP historical; fall back to Finnhub candles. The result
 # carries the source + any failure reason so the UI is never silently empty.
 # ---------------------------------------------------------------------------
-def _rows_to_series(rows: list, ticker: str) -> pd.Series:
-    """Build a price Series from stable/legacy history rows.
+def _rows_to_frame(rows: list, ticker: str) -> pd.DataFrame:
+    """Build a DataFrame with ``adj`` (adjusted) and ``raw`` (unadjusted) close.
 
-    Defensive about the price field name (stable EOD may use ``adjClose``,
-    ``close``, or the light endpoint's ``price``); logs which one was used so a
-    live shape mismatch is easy to spot.
+    Returns must be computed on the **adjusted** basis so splits/dividends don't
+    fabricate moves; the displayed last price uses the **raw** (unadjusted) close
+    — what the stock actually trades at. Keeping both columns lets us be
+    consistent end to end and surface the difference in diagnostics.
     """
-    from data.fmp_client import pick_price_field
     if not rows:
-        return pd.Series(dtype="float64", name=ticker)
+        return pd.DataFrame()
     df = pd.DataFrame(rows)
     if "date" not in df.columns:
         logger.warning("FMP history for %s has no 'date' column; keys=%s",
                        ticker, list(df.columns)[:8])
-        return pd.Series(dtype="float64", name=ticker)
-    price_col = pick_price_field(rows[0])
-    if price_col is None or price_col not in df.columns:
+        return pd.DataFrame()
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.set_index("date").sort_index()
+
+    def _first_col(cands):
+        for c in cands:
+            if c in df.columns:
+                col = pd.to_numeric(df[c], errors="coerce")
+                if col.notna().any():
+                    return c, col
+        return None, None
+
+    adj_name, adj = _first_col(["adjClose", "adj_close", "adjustedClose",
+                                "close", "price"])
+    raw_name, raw = _first_col(["close", "price", "adjClose", "adj_close"])
+    if adj is None:
         logger.warning("FMP history for %s: no known price field in %s",
                        ticker, list(df.columns)[:8])
-        return pd.Series(dtype="float64", name=ticker)
-    logger.info("FMP history for %s: using price field '%s'", ticker, price_col)
-    df["date"] = pd.to_datetime(df["date"])
-    s = (df.set_index("date")[price_col].astype("float64")
-         .sort_index().dropna())
-    s.name = ticker
-    return s
+        return pd.DataFrame()
+    logger.info("FMP history for %s: adj field '%s', raw field '%s'",
+                ticker, adj_name, raw_name)
+    out = pd.DataFrame({"adj": adj})
+    out["raw"] = raw if raw is not None else adj
+    return out.dropna(subset=["adj"])
 
 
 @st.cache_data(ttl=HISTORY_TTL, show_spinner=False)
 def get_history_result(ticker: str) -> dict:
-    """Return ``{series, source, error}`` for a ticker's daily history.
+    """Return ``{series, raw_last, raw_last_date, source, error}``.
 
-    Precedence: FMP historical -> Finnhub candles -> empty (with reason).
+    ``series`` is the **adjusted**-close Series (used for all return math);
+    ``raw_last`` / ``raw_last_date`` are the latest **unadjusted** close + date
+    (used for the displayed last price). Precedence: FMP historical -> Finnhub
+    candles -> empty (with reason). Finnhub candles are already split-adjusted,
+    so raw == adj on that path.
     """
     fmp_err = None
     try:
         res = get_client().historical_result(ticker)
         rows, fmp_err = res["rows"], res.get("error")
         if rows:
-            s = _rows_to_series(rows, ticker)
-            if not s.empty:
-                return {"series": s, "source": "FMP", "error": None}
+            frame = _rows_to_frame(rows, ticker)
+            if not frame.empty:
+                s = frame["adj"].rename(ticker)
+                raw = frame["raw"].dropna()
+                return {"series": s,
+                        "raw_last": float(raw.iloc[-1]) if not raw.empty else None,
+                        "raw_last_date": raw.index[-1] if not raw.empty else None,
+                        "source": "FMP", "error": None}
     except FMPError:
         fmp_err = "FMP_API_KEY not set"
 
@@ -120,16 +141,21 @@ def get_history_result(ticker: str) -> dict:
                           name=ticker).sort_index().dropna()
             reason = (f"FMP: {fmp_err}" if fmp_err else
                       "FMP historical unavailable")
-            return {"series": s, "source": "Finnhub", "error": reason}
+            return {"series": s,
+                    "raw_last": float(s.iloc[-1]) if not s.empty else None,
+                    "raw_last_date": s.index[-1] if not s.empty else None,
+                    "source": "Finnhub", "error": reason}
         finn_err = c["error"]
         reason = "; ".join(x for x in [f"FMP: {fmp_err}" if fmp_err else None,
                                        f"Finnhub: {finn_err}"] if x)
         return {"series": pd.Series(dtype="float64", name=ticker),
+                "raw_last": None, "raw_last_date": None,
                 "source": None, "error": reason}
 
     reason = (f"FMP historical not available ({fmp_err})" if fmp_err else
               "FMP returned no history; set FINNHUB_API_KEY to enable fallback")
     return {"series": pd.Series(dtype="float64", name=ticker),
+            "raw_last": None, "raw_last_date": None,
             "source": None, "error": reason}
 
 
@@ -468,3 +494,68 @@ def run_diagnostics(ticker: str = "NVDA") -> List[dict]:
                      "error": "FINNHUB_API_KEY not set", "empty": False,
                      "kind": None, "keys": None, "sample": None})
     return rows
+
+
+def price_basis_report(ticker: str) -> dict:
+    """Side-by-side price-basis diagnostics for one ticker, so a split/source
+    mismatch is self-evident.
+
+    Returns ``{latest_close, latest_adjclose, morningstar_last, computed_1y,
+    last_rows, note}`` — last_rows is the last 3 history rows (date, close,
+    adjClose). Computed 1Y uses the **adjusted** series (split-safe).
+    """
+    out = {"ticker": ticker.upper(), "latest_close": None,
+           "latest_adjclose": None, "morningstar_last": None,
+           "computed_1y": None, "last_rows": [], "note": None}
+
+    # Morningstar static Last Price (the export-time value).
+    try:
+        from data import morningstar as _ms
+        msf = _ms.load_morningstar()
+        r = msf[msf["Ticker"] == ticker.upper()]
+        if not r.empty:
+            v = r["Last Price"].iloc[0]
+            out["morningstar_last"] = float(v) if pd.notna(v) else None
+    except Exception as exc:
+        out["note"] = f"Morningstar lookup failed: {exc}"
+
+    # Raw close vs adjusted close from the FMP history rows.
+    try:
+        res = get_client().historical_result(ticker)
+        rows = res.get("rows") or []
+        if res.get("error"):
+            out["note"] = (out["note"] or "") + f" FMP: {res['error']}"
+        if rows:
+            df = pd.DataFrame(rows)
+            df["date"] = pd.to_datetime(df.get("date"), errors="coerce")
+            df = df.dropna(subset=["date"]).sort_values("date")
+            close = pd.to_numeric(df.get("close"), errors="coerce") \
+                if "close" in df else None
+            adj = pd.to_numeric(df.get("adjClose"), errors="coerce") \
+                if "adjClose" in df else None
+            if close is not None and close.notna().any():
+                out["latest_close"] = float(close.dropna().iloc[-1])
+            if adj is not None and adj.notna().any():
+                out["latest_adjclose"] = float(adj.dropna().iloc[-1])
+            # Last 3 rows: date, close, adjClose.
+            for _, rr in df.tail(3).iterrows():
+                out["last_rows"].append({
+                    "date": rr["date"].strftime("%Y-%m-%d"),
+                    "close": (float(rr["close"]) if "close" in df
+                              and pd.notna(rr.get("close")) else None),
+                    "adjClose": (float(rr["adjClose"]) if "adjClose" in df
+                                 and pd.notna(rr.get("adjClose")) else None),
+                })
+            # Computed 1Y on the adjusted series (split-safe).
+            hist = get_history_result(ticker)
+            s = hist["series"]
+            if s is not None and not s.empty:
+                from core.performance import trailing_return
+                out["computed_1y"] = trailing_return(s, pd.DateOffset(years=1))
+        elif not out["note"]:
+            out["note"] = "FMP returned no history rows."
+    except FMPError:
+        out["note"] = "FMP_API_KEY not set"
+    except Exception as exc:
+        out["note"] = (out["note"] or "") + f" history error: {exc}"
+    return out

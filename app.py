@@ -128,8 +128,12 @@ def settings_popover() -> None:
                                    key="diag_ticker").strip().upper() or "NVDA"
             if st.button("Run diagnostics", width="stretch", key="run_diag"):
                 st.session_state["_diag_rows"] = service.run_diagnostics(test_t)
+                st.session_state["_diag_price"] = service.price_basis_report(test_t)
             for r in st.session_state.get("_diag_rows", []):
                 _render_diag_row(r)
+            pb = st.session_state.get("_diag_price")
+            if pb:
+                _render_price_basis(pb)
 
         src = []
         src.append("Finnhub" if service.has_finnhub() else "Finnhub (no key)")
@@ -157,6 +161,29 @@ def _render_diag_row(r: dict) -> None:
     st.markdown(
         f'<div class="muted-note" style="margin:2px 0;"><b>{r["endpoint"]}</b>'
         f'{status}: {body}</div>', unsafe_allow_html=True)
+
+
+def _render_price_basis(pb: dict) -> None:
+    """Show close vs adjClose vs Morningstar Last vs computed 1Y side by side."""
+    def _p(v):
+        return cp.fmt_price(v) if v is not None else cp.DASH
+    st.markdown(f'<div class="muted-note" style="margin-top:6px;"><b>Price basis '
+                f'· {pb.get("ticker")}</b></div>', unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="muted-note">latest close {_p(pb.get("latest_close"))} · '
+        f'latest adjClose {_p(pb.get("latest_adjclose"))} · '
+        f'Morningstar Last {_p(pb.get("morningstar_last"))} · '
+        f'computed 1Y (adj) {cp.fmt_pct_frac(pb.get("computed_1y"))}</div>',
+        unsafe_allow_html=True)
+    if pb.get("last_rows"):
+        rows = " | ".join(
+            f'{r["date"]}: close {_p(r["close"])}/adj {_p(r["adjClose"])}'
+            for r in pb["last_rows"])
+        st.markdown(f'<div class="muted-note">last rows — {rows}</div>',
+                    unsafe_allow_html=True)
+    if pb.get("note"):
+        st.markdown(f'<div class="muted-note" style="color:{styles.NEGATIVE};">'
+                    f'{cp._esc(pb["note"])}</div>', unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1656,10 +1683,6 @@ def main():
         st.error(str(e))
         st.stop()
 
-    # Capex-cycle timing columns (valuation_tier / value_trap / upside_fv) on the
-    # full frame so every view can read them.
-    full = tm.add_timing_columns(full)
-
     # Horizontal text-only nav (no emoji), enterprise styling, active underline.
     selected = option_menu(
         menu_title=None, options=NAV_ITEMS, orientation="horizontal",
@@ -1676,6 +1699,17 @@ def main():
     # compute it here on all 226 names before any filter is applied.
     perf_full = perf_full.copy()
     perf_full["Momentum score"] = perf.blended_momentum_score(perf_full)
+
+    # ONE authoritative last price (live quote -> raw close -> Morningstar) flows
+    # from perf_full into `full`, so the displayed price AND upside-to-fair-value
+    # are consistent (no split-distorted or stale-static mismatch).
+    auth_price = perf_full.set_index("Ticker")["Last Price"]
+    full = full.copy()
+    full["Last Price"] = full["Ticker"].map(auth_price).fillna(full["Last Price"])
+
+    # Capex-cycle timing columns (valuation_tier / value_trap / upside_fv) — now
+    # computed against the authoritative last price.
+    full = tm.add_timing_columns(full)
 
     # Stash for the cached factor builder + compute scores.
     st.session_state["_ms_full"] = full

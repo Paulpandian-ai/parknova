@@ -8,10 +8,13 @@ here so the whole performance frame uses one convention: fractions, e.g. 0.123).
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+
+logger = logging.getLogger("parknova.performance")
 
 # Live windows (from FMP) then Morningstar trailing windows.
 LIVE_WINDOWS = ["Today", "1W", "1M", "3M", "6M"]
@@ -55,14 +58,58 @@ def last_session_change(series: pd.Series) -> Optional[Dict[str, Any]]:
     }
 
 
+# Returns above this magnitude (e.g. 500%) are almost always a split/units
+# artifact rather than a real move — log the inputs so they surface.
+SANITY_RETURN = 5.0
+
+
+def trailing_return(series: pd.Series, offset) -> Optional[float]:
+    """Total return over ``offset`` (a pandas DateOffset) from an (adjusted)
+    series, using nearest-prior pricing. None when there isn't enough history."""
+    if series is None or series.empty:
+        return None
+    s = series.sort_index()
+    latest = float(s.iloc[-1])
+    start_date = s.index[-1] - offset
+    if start_date < s.index[0] or latest == 0:
+        return None
+    start_val = s.asof(start_date)
+    if pd.isna(start_val) or not start_val:
+        return None
+    return latest / float(start_val) - 1.0
+
+
+def ytd_return(series: pd.Series) -> Optional[float]:
+    """Year-to-date total return from an (adjusted) series (None if too short)."""
+    if series is None or series.empty:
+        return None
+    s = series.sort_index()
+    latest = float(s.iloc[-1])
+    jan1 = pd.Timestamp(year=s.index[-1].year, month=1, day=1)
+    if s.index[0] > jan1 or latest == 0:
+        return None
+    start_val = s.asof(jan1)
+    if pd.isna(start_val) or not start_val:
+        return None
+    return latest / float(start_val) - 1.0
+
+
+# Adjusted-series offsets for the Morningstar trailing windows (split/dividend
+# safe). YTD is handled separately by ytd_return.
+_MS_OFFSETS = {"1Y": pd.DateOffset(years=1), "3Y": pd.DateOffset(years=3),
+               "5Y": pd.DateOffset(years=5)}
+
+
 def live_windows_from_series(
-    series: pd.Series, today_pct: Optional[float] = None
+    series: pd.Series, today_pct: Optional[float] = None,
+    ticker: Optional[str] = None,
 ) -> Dict[str, Optional[float]]:
     """Return live window returns as fractions. ``today_pct`` is FMP percent.
 
     "Today" precedence: a non-null/non-zero live percent, else the last completed
     session's close-to-close change from ``series`` (so it is never blank when
-    history exists).
+    history exists). Window returns use the (adjusted) series; any |return| above
+    ``SANITY_RETURN`` is logged with the two prices used (likely split-distorted).
     """
     out: Dict[str, Optional[float]] = {w: None for w in LIVE_WINDOWS}
     if today_pct is not None and pd.notna(today_pct) and float(today_pct) != 0.0:
@@ -88,7 +135,13 @@ def live_windows_from_series(
             continue
         start_val = series.asof(start_date)
         if pd.notna(start_val) and start_val:
-            out[label] = latest / float(start_val) - 1.0
+            ret = latest / float(start_val) - 1.0
+            if abs(ret) > SANITY_RETURN:
+                logger.warning("Implausible %s return for %s: %.0f%% "
+                               "(start %.2f -> latest %.2f) — likely split/units "
+                               "artifact", label, ticker or "?", ret * 100,
+                               float(start_val), latest)
+            out[label] = ret
     return out
 
 
@@ -114,11 +167,23 @@ def build_performance_frame(
     for i, (_, meta) in enumerate(ms_df.iterrows()):
         ticker = meta["Ticker"]
         q = quotes.get(ticker) or {}
-        series = service.get_history(ticker) if live else pd.Series(dtype="float64")
-        live_vals = live_windows_from_series(series, q.get("changesPercentage"))
+        if live:
+            hist = service.get_history_result(ticker)
+            series = hist["series"]
+            raw_last = hist.get("raw_last")
+        else:
+            series = pd.Series(dtype="float64")
+            raw_last = None
+        live_vals = live_windows_from_series(series, q.get("changesPercentage"),
+                                             ticker=ticker)
 
-        # Prefer live intraday price; fall back to Morningstar Last Price.
+        # Authoritative displayed price (ONE basis, consistent with returns):
+        #   live intraday quote -> latest raw/unadjusted close -> Morningstar.
+        # Returns above are computed from the *adjusted* series, so splits never
+        # create phantom moves while the shown price is what the stock trades at.
         price = q.get("price")
+        if price is None or pd.isna(price):
+            price = raw_last
         if price is None or pd.isna(price):
             price = meta.get("Last Price")
 
@@ -134,9 +199,26 @@ def build_performance_frame(
             "has_live": not series.empty or bool(q),
         }
         row.update(live_vals)
+        # Trailing returns: compute from the ADJUSTED series (split/dividend
+        # safe) when history allows; fall back to the Morningstar column only
+        # when there isn't enough history. This keeps the trailing returns on
+        # the same adjusted basis as the live windows + crest index, avoiding
+        # the phantom (split/units-distorted) Morningstar values.
         for w in MS_WINDOWS:
-            raw = meta.get(_MS_SOURCE[w])
-            row[w] = (float(raw) / 100.0) if pd.notna(raw) else np.nan
+            computed = (ytd_return(series) if w == "YTD"
+                        else trailing_return(series, _MS_OFFSETS[w]))
+            ms_raw = meta.get(_MS_SOURCE[w])
+            ms_frac = (float(ms_raw) / 100.0) if pd.notna(ms_raw) else np.nan
+            if computed is not None:
+                frac = computed
+            else:
+                # Falling back to Morningstar — flag if it looks implausible.
+                if pd.notna(ms_frac) and abs(ms_frac) > SANITY_RETURN:
+                    logger.warning("Implausible Morningstar %s for %s: %.0f%% — "
+                                   "no FMP history to override; verify units/"
+                                   "splits", w, ticker, ms_frac * 100)
+                frac = ms_frac
+            row[w] = frac
 
         # Momentum inputs for the factor engine (fractions).
         row["mom_3m"] = live_vals.get("3M")

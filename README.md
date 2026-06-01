@@ -160,6 +160,17 @@ cp .env.example .env
 - **History precedence** (chart + 1W/1M/3M/6M windows): FMP stable EOD → Finnhub
   daily candles → "—" with the reason shown. Each ticker's history is fetched
   once and all windows (and the EOD "Today" fallback) are sliced from it.
+- **Consistent price basis (no split-driven phantom returns):** all return math
+  (live windows, trailing YTD/1Y/3Y/5Y, the crest index) uses the **adjusted**
+  close; the **displayed last price** uses the latest **raw/unadjusted** close
+  (what the stock actually trades at) → live quote → raw close → Morningstar.
+  Trailing returns are computed from the adjusted series when history allows and
+  only fall back to the Morningstar column when it doesn't — so a split- or
+  units-distorted Morningstar figure (e.g. a phantom +863% 1Y) is overridden by
+  the split-safe computed value. Any |return| > 500% is logged with the prices
+  used. **Settings → Data diagnostics** shows, for a test ticker, latest close
+  vs adjClose vs Morningstar Last vs computed-1Y plus the last 3 history rows, so
+  any future mismatch is self-evident.
 - **Cross-sectional scores are universe-wide:** momentum and all factor/composite
   z-scores are computed across the full 226-name universe *before* any filter;
   filtering only subsets rows for display. Filtering to a single ticker shows its
