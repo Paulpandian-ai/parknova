@@ -126,10 +126,21 @@ cp .env.example .env
 
 ### Live data: quotes, history, diagnostics
 
-- **Quote precedence** (price + today's %): Finnhub (near-real-time) → FMP quote → "—".
-- **History precedence** (chart + 1W/1M/3M/6M windows): FMP `historical-price-full`
-  → Finnhub daily candles → "—" with the reason shown. Each ticker's history is
-  fetched once and all windows are sliced from it.
+- **"Today" precedence (meaningful 24/7):** live intraday — Finnhub `dp` when
+  non-null/non-zero (market open, tagged "live") → **EOD fallback** — the last
+  completed session's close-to-close change from the already-cached daily history
+  (market closed / Finnhub flat, tagged "last close" + session date) → "—" only
+  when no history exists. Computed via `last_session_change()` in
+  `core/performance.py`, reusing the single cached per-ticker history (no extra
+  calls). The Performance "Today" column never shows a bare blank when history
+  exists.
+- **History precedence** (chart + 1W/1M/3M/6M windows): FMP stable EOD → Finnhub
+  daily candles → "—" with the reason shown. Each ticker's history is fetched
+  once and all windows (and the EOD "Today" fallback) are sliced from it.
+- **Cross-sectional scores are universe-wide:** momentum and all factor/composite
+  z-scores are computed across the full 226-name universe *before* any filter;
+  filtering only subsets rows for display. Filtering to a single ticker shows its
+  true universe-relative score (e.g. MU momentum), never a degenerate 0.00.
 - **Near-real-time refresh:** Stock Detail's quote and a Performance "Live quotes"
   strip poll via `st.fragment(run_every=...)`; the interval (Off / 15s / 30s /
   60s) is set in **Settings**. Only the selected/visible tickers poll — never all

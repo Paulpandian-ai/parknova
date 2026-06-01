@@ -8,7 +8,7 @@ here so the whole performance frame uses one convention: fractions, e.g. 0.123).
 
 from __future__ import annotations
 
-from typing import Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -33,16 +33,50 @@ _OFFSETS = {
 }
 
 
+def last_session_change(series: pd.Series) -> Optional[Dict[str, Any]]:
+    """Close-to-close change of the last completed session from a price Series.
+
+    Returns ``{pct, prev_close, last_close, date}`` (pct as a fraction) using the
+    already-cached per-ticker history — no extra API call. ``None`` when there
+    aren't two sessions to compare.
+    """
+    if series is None or series.empty or len(series) < 2:
+        return None
+    series = series.sort_index()
+    last_close = float(series.iloc[-1])
+    prev_close = float(series.iloc[-2])
+    if prev_close == 0:
+        return None
+    return {
+        "pct": last_close / prev_close - 1.0,
+        "prev_close": prev_close,
+        "last_close": last_close,
+        "date": series.index[-1],
+    }
+
+
 def live_windows_from_series(
     series: pd.Series, today_pct: Optional[float] = None
 ) -> Dict[str, Optional[float]]:
-    """Return live window returns as fractions. ``today_pct`` is FMP percent."""
+    """Return live window returns as fractions. ``today_pct`` is FMP percent.
+
+    "Today" precedence: a non-null/non-zero live percent, else the last completed
+    session's close-to-close change from ``series`` (so it is never blank when
+    history exists).
+    """
     out: Dict[str, Optional[float]] = {w: None for w in LIVE_WINDOWS}
-    if today_pct is not None and pd.notna(today_pct):
+    if today_pct is not None and pd.notna(today_pct) and float(today_pct) != 0.0:
         out["Today"] = float(today_pct) / 100.0
 
     if series is None or series.empty:
         return out
+
+    # EOD fallback for "Today" when the live percent is missing/zero (closed).
+    if out["Today"] is None:
+        eod = last_session_change(series)
+        if eod is not None:
+            out["Today"] = eod["pct"]
+
     series = series.sort_index()
     latest = float(series.iloc[-1])
     latest_date = series.index[-1]

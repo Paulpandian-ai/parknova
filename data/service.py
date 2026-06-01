@@ -149,30 +149,72 @@ def get_quotes_batch(tickers: tuple) -> Dict[str, dict]:
 # ttl=15s keeps it fresh without hammering the free tier.
 # ---------------------------------------------------------------------------
 @st.cache_data(ttl=QUOTE_TTL, show_spinner=False)
-def get_live_quote(ticker: str) -> dict:
-    """Return ``{price, pct, source, ts, error}`` for one ticker.
+def _eod_change(ticker: str) -> Optional[dict]:
+    """Last completed session's close-to-close change (reuses cached history)."""
+    from core.performance import last_session_change
+    series = get_history_result(ticker)["series"]
+    return last_session_change(series)
 
-    Finnhub (near-real-time) first, then FMP quote, else a reason.
+
+def get_live_quote(ticker: str) -> dict:
+    """Return ``{price, pct, source, mode, as_of, error}`` for one ticker.
+
+    "Today" precedence so the value is meaningful 24/7:
+      1. live intraday — Finnhub dp that is non-null AND non-zero (market open);
+         mode='live', as_of=unix ts.
+      2. EOD fallback — last completed session's close-to-close from the cached
+         FMP-stable history (market closed / Finnhub flat); mode='last close',
+         as_of=session date. No extra API call.
+      3. FMP quote percent if present, else '—'.
+    ``price`` prefers the freshest last price available (Finnhub -> FMP -> last
+    close from history).
     """
+    price = None
+    source = None
+    finn_err = None
+
     if has_finnhub_key():
         q = get_finnhub_client().quote(ticker)
         if q["price"] is not None:
-            return {"price": q["price"], "pct": q["pct"], "source": "Finnhub",
-                    "ts": q["ts"], "error": None}
-        finn_err = q["error"]
+            price, source = q["price"], "Finnhub"
+            pct, ts = q["pct"], q["ts"]
+            # Live intraday: non-null AND non-zero change.
+            if pct is not None and float(pct) != 0.0:
+                return {"price": price, "pct": float(pct) / 100.0,
+                        "source": source, "mode": "live", "as_of": ts,
+                        "error": None}
+        else:
+            finn_err = q["error"]
     else:
         finn_err = "no FINNHUB_API_KEY"
 
-    # Fall back to FMP batch quote (single symbol).
-    try:
-        fq = get_client().quotes_batch([ticker]).get(ticker) or {}
-    except FMPError:
-        fq = {}
-    if fq.get("price") is not None:
-        return {"price": fq.get("price"), "pct": fq.get("changesPercentage"),
-                "source": "FMP", "ts": None, "error": None}
-    return {"price": None, "pct": None, "source": None, "ts": None,
-            "error": f"Finnhub: {finn_err}; FMP quote also empty"}
+    # FMP quote (single symbol) for a price (and a possible percent).
+    fq = {}
+    if price is None:
+        try:
+            fq = get_client().quotes_batch([ticker]).get(ticker) or {}
+        except FMPError:
+            fq = {}
+        if fq.get("price") is not None:
+            price, source = fq.get("price"), "FMP"
+
+    # EOD fallback for the percent (market closed / live flat).
+    eod = _eod_change(ticker)
+    if eod is not None:
+        if price is None:
+            price, source = eod["last_close"], "FMP (EOD)"
+        return {"price": price, "pct": eod["pct"], "source": source or "FMP",
+                "mode": "last close", "as_of": eod["date"], "error": None}
+
+    # No history: last resort is the FMP quote percent if any.
+    fpct = fq.get("changesPercentage")
+    if price is not None:
+        return {"price": price, "pct": (float(fpct) / 100.0)
+                if fpct not in (None, 0) else None,
+                "source": source, "mode": "live" if fpct else None,
+                "as_of": None, "error": None}
+    return {"price": None, "pct": None, "source": None, "mode": None,
+            "as_of": None, "error": f"Finnhub: {finn_err}; FMP quote also empty"}
 
 
 @st.cache_data(ttl=NEWS_TTL, show_spinner=False)

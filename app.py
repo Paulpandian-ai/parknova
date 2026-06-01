@@ -189,13 +189,22 @@ def _render_quote_inline(ticker: str, fallback_price=None) -> None:
                 unsafe_allow_html=True)
         return
     cls = "" if pct is None else ("pos" if float(pct) >= 0 else "neg")
-    move = cp.DASH if pct is None else cp.fmt_pct_frac(float(pct) / 100.0)
-    now = _dt.datetime.now().strftime("%H:%M:%S")
+    move = cp.DASH if pct is None else cp.fmt_pct_frac(pct)  # pct is a fraction
+    # Honest "live" vs "last close" tag (Bug-1): markets closed -> EOD change.
+    if q.get("mode") == "live":
+        now = _dt.datetime.now().strftime("%H:%M:%S")
+        tag = f"live · {source} · updated {now}"
+    elif q.get("mode") == "last close":
+        d = q.get("as_of")
+        dstr = (pd.Timestamp(d).strftime("%b %d") if d is not None else "")
+        tag = f"last close · {source}{(' · ' + dstr) if dstr else ''}"
+    else:
+        tag = source or ""
     st.markdown(
-        f'<div class="metric-card"><div class="label">Live price · {source}</div>'
+        f'<div class="metric-card"><div class="label">Today · {source}</div>'
         f'<div class="value">{cp.fmt_price(price)} '
         f'<span class="{cls}" style="font-size:0.9rem;">{move}</span></div>'
-        f'<div class="sub">live · updated {now}</div></div>',
+        f'<div class="sub">{tag}</div></div>',
         unsafe_allow_html=True)
 
 
@@ -214,24 +223,29 @@ def live_quote_card(ticker: str, fallback_price=None) -> None:
 
 
 def _render_ticker_strip(tickers: list) -> None:
-    """Compact live 'Today' strip for a small set of tickers."""
+    """Compact 'Today' strip (live intraday or last-session close) per ticker."""
     import datetime as _dt
     cells = st.columns(len(tickers))
+    modes = set()
     for col, t in zip(cells, tickers):
         with col:
             q = service.get_live_quote(t)
             if q["price"] is None:
                 cp.stat_card(t, cp.DASH, cp._esc(q["error"] or "")[:24])
             else:
-                pct = q["pct"]
+                pct = q["pct"]  # fraction
+                modes.add(q.get("mode"))
                 cp.stat_card(t, cp.fmt_price(q["price"]),
-                             cp.fmt_pct_frac(float(pct) / 100.0) if pct is not None
-                             else cp.DASH,
+                             cp.fmt_pct_frac(pct) if pct is not None else cp.DASH,
                              sign=pct)
     now = _dt.datetime.now().strftime("%H:%M:%S")
-    src = "Finnhub" if service.has_finnhub() else "FMP"
-    st.markdown(f'<div class="muted-note">live · {src} · updated {now}</div>',
-                unsafe_allow_html=True)
+    if modes == {"last close"}:
+        tag = "last close (markets closed)"
+    elif "live" in modes:
+        tag = f"live · updated {now}"
+    else:
+        tag = f"updated {now}"
+    st.markdown(f'<div class="muted-note">{tag}</div>', unsafe_allow_html=True)
 
 
 def live_ticker_strip(tickers: list, max_n: int = 8) -> None:
@@ -353,9 +367,13 @@ def _performance_table(df: pd.DataFrame, sort_win: str):
 
 def _momentum_rank(df: pd.DataFrame):
     st.caption("Blended momentum = avg z-score of 1M / 3M / 6M (live) + 1Y "
-               "(Morningstar).")
+               "(Morningstar), computed across the full universe.")
     d = df.copy()
-    d["Momentum score"] = perf.blended_momentum_score(d)
+    # Momentum score is precomputed universe-wide on perf_full (Bug-2 fix); a
+    # filtered view must reuse it, never recompute on the subset. Fall back to a
+    # universe-wide compute only if the column is somehow absent.
+    if "Momentum score" not in d.columns:
+        d["Momentum score"] = perf.blended_momentum_score(d)
     cols = ["Ticker", "Name", "Sector", "1M", "3M", "6M", "1Y", "Momentum score"]
     view = d[cols].sort_values("Momentum score", ascending=False, na_position="last")
     fmt = {w: (lambda v: cp.fmt_pct_frac(v)) for w in ["1M", "3M", "6M", "1Y"]}
@@ -433,11 +451,14 @@ def _fundamentals_table(full: pd.DataFrame, filtered_tickers: set):
 def _factor_scores_table(scores: pd.DataFrame, filtered_tickers: set):
     st.caption("Cross-sectional factor percentiles (0–100, higher = better) "
                "with an equal-weight composite. Tune weights on the Screener tab.")
-    df = scores[scores["Ticker"].isin(filtered_tickers)].copy()
+    # Bug-2 fix: factor percentiles + composite are universe-wide (computed on
+    # the full scores frame); filtering only subsets rows for display.
+    full_scored = scores.copy()
+    full_scored["Composite"] = fc.weighted_composite(scores, fc.default_weights())
+    df = full_scored[full_scored["Ticker"].isin(filtered_tickers)].copy()
     if df.empty:
         st.warning("No names match the current filters.")
         return
-    df["Composite"] = fc.weighted_composite(df, fc.default_weights())
     cols = ["Ticker", "Name", "Sector"] + fc.FACTOR_NAMES + ["Composite"]
     view = df[cols].sort_values("Composite", ascending=False, na_position="last")
     score_cols = fc.FACTOR_NAMES + ["Composite"]
@@ -478,16 +499,20 @@ def view_screener(full: pd.DataFrame, scores: pd.DataFrame):
         sort_by = st.selectbox("Sort by", ["Composite", "Upside to FV"],
                                index=0, key="screen_sort")
 
-    df = scores[scores["Ticker"].isin(filtered_tickers)].copy()
+    # Bug-2 fix: compute the weighted composite on the FULL universe (so its
+    # z-scores and percentile are universe-relative), then subset rows for
+    # display. Weights/tilt change the blend live, but never the universe.
+    full_scored = scores.copy()
+    full_scored["Composite"] = fc.weighted_composite(scores, weights)
+    if tilt_crest != "None" and "Crest" in full_scored.columns:
+        full_scored["Composite"] = (full_scored["Composite"] + (
+            (full_scored["Crest"] == tilt_crest).astype(float) * float(tilt_str))
+        ).clip(0, 100)
+
+    df = full_scored[full_scored["Ticker"].isin(filtered_tickers)].copy()
     if df.empty:
         st.warning("No names match the current filters.")
         return
-    df["Composite"] = fc.weighted_composite(df, weights)
-    # Crest tilt: add a flat bonus to the composite for the chosen crest layer.
-    if tilt_crest != "None" and "Crest" in df.columns:
-        df["Composite"] = df["Composite"] + (
-            (df["Crest"] == tilt_crest).astype(float) * float(tilt_str))
-        df["Composite"] = df["Composite"].clip(0, 100)
 
     # Merge timing columns (upside_fv / value_trap / tier) from the full frame.
     tcols_keep = ["Ticker", "valuation_tier", "value_trap", "upside_fv"]
@@ -1277,6 +1302,12 @@ def main():
         perf_full = build_performance(full)
     else:
         perf_full = perf.build_performance_frame(full, live=False)
+
+    # Bug-2 fix: cross-sectional scores must be computed on the FULL universe,
+    # then only subset for display. Momentum is a universe-relative z-score, so
+    # compute it here on all 226 names before any filter is applied.
+    perf_full = perf_full.copy()
+    perf_full["Momentum score"] = perf.blended_momentum_score(perf_full)
 
     # Stash for the cached factor builder + compute scores.
     st.session_state["_ms_full"] = full
