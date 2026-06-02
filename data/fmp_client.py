@@ -22,11 +22,12 @@ The class is Streamlit-free so it can be unit-tested; caching lives in
 from __future__ import annotations
 
 import logging
-import os
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
+
+from core.config import get_secret
 
 logger = logging.getLogger("parknova.fmp")
 
@@ -62,7 +63,7 @@ class FMPError(RuntimeError):
 
 class FMPClient:
     def __init__(self, api_key: Optional[str] = None, timeout: int = DEFAULT_TIMEOUT):
-        self.api_key = api_key or os.getenv("FMP_API_KEY")
+        self.api_key = api_key or get_secret("FMP_API_KEY")
         if not self.api_key:
             raise FMPError(
                 "FMP_API_KEY is not set. Copy .env.example to .env and add your key."

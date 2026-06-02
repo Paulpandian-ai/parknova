@@ -14,6 +14,7 @@ from streamlit_option_menu import option_menu
 
 from core import factors as fc
 from core import performance as perf
+from core import store
 from core import synthesis as synth
 from core import thesis as thx
 from core import timing as tm
@@ -135,6 +136,8 @@ def settings_popover() -> None:
             if pb:
                 _render_price_basis(pb)
 
+        _render_storage_status()
+
         src = []
         src.append("Finnhub" if service.has_finnhub() else "Finnhub (no key)")
         src.append("FMP" if service.has_api_key() else "FMP (no key)")
@@ -143,6 +146,28 @@ def settings_popover() -> None:
             'Morningstar (static). Quote: ' + " → ".join(src) +
             ' (15s cache). History: FMP → Finnhub candles (15m cache).'
             '</div>', unsafe_allow_html=True)
+
+
+def _render_storage_status() -> None:
+    """Show which store backend is live (S3 vs local), erroring loudly if S3 is
+    configured but unreachable — silent local fallback on the hosted app would
+    mean thesis/index data loss on the next reboot."""
+    s = store.storage_status()
+    if s["backend"] == "local":
+        st.markdown(
+            '<div class="muted-note">Storage: <b>local</b> '
+            '(.cache/ — ephemeral on hosted platforms). Set PARKNOVA_S3_BUCKET '
+            'for durable shared storage.</div>', unsafe_allow_html=True)
+        return
+    if s["ok"]:
+        st.markdown(
+            f'<div class="muted-note">Storage: '
+            f'<b style="color:{styles.POSITIVE};">S3</b> ({cp._esc(s["bucket"])})'
+            f'</div>', unsafe_allow_html=True)
+    else:
+        st.error(f"Storage: S3 configured ({s['bucket']}) but unreachable — "
+                 f"{s['error']}. Data would NOT persist. Fix the bucket name / "
+                 "AWS credentials before relying on saved theses.")
 
 
 def _render_diag_row(r: dict) -> None:

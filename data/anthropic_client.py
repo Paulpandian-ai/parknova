@@ -8,10 +8,11 @@ UI falls back to the deterministic summary.
 
 from __future__ import annotations
 
-import os
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
+
+from core.config import get_secret
 
 API_URL = "https://api.anthropic.com/v1/messages"
 TIMEOUT = 60
@@ -31,7 +32,7 @@ MODEL = MODEL_SONNET
 
 
 def has_anthropic_key() -> bool:
-    return bool(os.getenv("ANTHROPIC_API_KEY"))
+    return bool(get_secret("ANTHROPIC_API_KEY"))
 
 
 def _call_messages(prompt: str, model: str, max_tokens: int
@@ -41,7 +42,7 @@ def _call_messages(prompt: str, model: str, max_tokens: int
     Returns ``(text, usage)`` where usage is ``{input_tokens, output_tokens}``
     when the API provides it. On any failure returns ``(None, None)``.
     """
-    key = os.getenv("ANTHROPIC_API_KEY")
+    key = get_secret("ANTHROPIC_API_KEY")
     if not key:
         return None, None
     try:
@@ -107,7 +108,7 @@ def generate_summary(ticker: str, name: str, news: List[dict],
                      filings: List[dict], insider_summary: Dict[str, Any],
                      institutional: List[dict]) -> Optional[str]:
     """Return a 4-6 sentence factual narrative, or None on any failure."""
-    key = os.getenv("ANTHROPIC_API_KEY")
+    key = get_secret("ANTHROPIC_API_KEY")
     if not key:
         return None
     context = _format_context(ticker, name, news, filings, insider_summary,

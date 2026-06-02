@@ -10,23 +10,24 @@ Streamlit-free so it can be unit-tested; caching lives in ``data/service.py``.
 
 from __future__ import annotations
 
-import os
 import time
 from typing import Any, Dict, Optional
 
 import requests
+
+from core.config import get_secret
 
 BASE = "https://finnhub.io/api/v1"
 DEFAULT_TIMEOUT = 12
 
 
 def has_finnhub_key() -> bool:
-    return bool(os.getenv("FINNHUB_API_KEY"))
+    return bool(get_secret("FINNHUB_API_KEY"))
 
 
 class FinnhubClient:
     def __init__(self, api_key: Optional[str] = None, timeout: int = DEFAULT_TIMEOUT):
-        self.api_key = api_key or os.getenv("FINNHUB_API_KEY")
+        self.api_key = api_key or get_secret("FINNHUB_API_KEY")
         self.timeout = timeout
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": "ParkNova/1.0"})
