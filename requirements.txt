@@ -1,0 +1,11 @@
+streamlit>=1.40  # >=1.37 needed for st.fragment(run_every=...)
+pandas>=2.0
+numpy>=1.26
+openpyxl>=3.1
+requests>=2.31
+plotly>=5.20
+python-dotenv>=1.0
+scipy>=1.11
+beautifulsoup4>=4.12
+lxml>=5.0
+streamlit-option-menu>=0.3.12
