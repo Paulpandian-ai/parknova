@@ -942,15 +942,20 @@ def _pullbacks_from_high(tickers: list) -> tuple:
 # ---------------------------------------------------------------------------
 # View: News & Filings (Feature B)
 # ---------------------------------------------------------------------------
-def view_news(full: pd.DataFrame, perf_full: pd.DataFrame,
-              scores: pd.DataFrame):
+def view_news(full: pd.DataFrame):
     st.markdown('<div class="view-title">News &amp; Filings</div>',
                 unsafe_allow_html=True)
     options = full["Ticker"].tolist()
     labels = dict(zip(full["Ticker"], full["Name"]))
-    ticker = st.selectbox("Ticker", options,
-                          format_func=lambda t: f"{t} · {labels.get(t, '')}",
-                          key="news_ticker")
+    ticker = st.selectbox(
+        "Ticker", options, index=None,
+        placeholder="Select a ticker…",
+        format_func=lambda t: f"{t} · {labels.get(t, '')}",
+        key="selected_ticker")
+
+    if ticker is None:
+        st.info("Select a ticker above to view news and filings.")
+        return
     row = full[full["Ticker"] == ticker].iloc[0]
 
     # --- Header ---
@@ -1215,16 +1220,21 @@ _DETAIL_WINDOWS = {"1W": pd.DateOffset(weeks=1), "1M": pd.DateOffset(months=1),
                    "1Y": pd.DateOffset(years=1), "5Y": pd.DateOffset(years=5)}
 
 
-def view_detail(full: pd.DataFrame, perf_full: pd.DataFrame,
-                scores: pd.DataFrame):
+def view_detail(full: pd.DataFrame, scores: pd.DataFrame):
     st.markdown('<div class="view-title">Stock Detail</div>',
                 unsafe_allow_html=True)
-    pool = full
-    options = pool["Ticker"].tolist()
-    labels = dict(zip(pool["Ticker"], pool["Name"]))
-    ticker = st.selectbox("Select a ticker", options,
-                          format_func=lambda t: f"{t} · {labels.get(t, '')}",
-                          key="detail_ticker")
+    options = full["Ticker"].tolist()
+    labels = dict(zip(full["Ticker"], full["Name"]))
+    ticker = st.selectbox(
+        "Select a ticker", options, index=None,
+        placeholder="Select a ticker…",
+        format_func=lambda t: f"{t} · {labels.get(t, '')}",
+        key="selected_ticker")
+
+    if ticker is None:
+        st.info("Select a ticker above to view its detail.")
+        return
+
     row = full[full["Ticker"] == ticker].iloc[0]
 
     # --- Header ---
@@ -1282,6 +1292,7 @@ def view_detail(full: pd.DataFrame, perf_full: pd.DataFrame,
     st.markdown('<div class="section-title">Price</div>', unsafe_allow_html=True)
     win = st.radio("Window", list(_DETAIL_WINDOWS.keys()) + ["Max"],
                    index=4, horizontal=True, key="detail_win")
+    series = pd.Series(dtype="float64")
     if service.has_api_key() or service.has_finnhub():
         hist = service.get_history_result(ticker)
         series = hist["series"]
@@ -1299,15 +1310,9 @@ def view_detail(full: pd.DataFrame, perf_full: pd.DataFrame,
     else:
         st.info("Set FMP_API_KEY or FINNHUB_API_KEY to load the price chart.")
 
-    # --- Return cards (9 windows) ---
+    # --- Return cards (9 windows) — computed from the already-fetched series ---
     st.markdown('<div class="section-title">Returns</div>', unsafe_allow_html=True)
-    prow = perf_full[perf_full["Ticker"] == ticker]
-    prow = prow.iloc[0] if not prow.empty else None
-    rcols = st.columns(len(perf.ALL_WINDOWS))
-    for col, w in zip(rcols, perf.ALL_WINDOWS):
-        with col:
-            v = prow[w] if prow is not None else None
-            cp.stat_card(w, cp.fmt_pct_frac(v), sign=v)
+    _detail_return_cards(ticker, row, series)
 
     # --- Factor radar ---
     st.markdown('<div class="section-title">Factor profile</div>',
@@ -1343,6 +1348,32 @@ def view_detail(full: pd.DataFrame, perf_full: pd.DataFrame,
     with nf_sec:
         st.caption("Recent SEC filings")
         cp.filings_feed(service.get_sec_filings(ticker, limit=10), limit=6)
+
+
+def _detail_return_cards(ticker: str, row: pd.Series, series: pd.Series) -> None:
+    """Render 9 return-window stat cards from the already-fetched history series.
+
+    Live windows (Today/1W/1M/3M/6M) come from the adjusted series.
+    Trailing windows (YTD/1Y/3Y/5Y): computed from adjusted series, falling
+    back to the Morningstar columns when there isn't enough history — same
+    logic as build_performance_frame, but for a single ticker only.
+    """
+    live_vals = perf.live_windows_from_series(series, None, ticker=ticker)
+    ms_vals: dict = {}
+    for w in perf.MS_WINDOWS:
+        computed = (perf.ytd_return(series) if w == "YTD"
+                    else perf.trailing_return(series, perf._MS_OFFSETS[w]))
+        ms_raw = row.get(perf._MS_SOURCE[w])
+        if computed is not None:
+            ms_vals[w] = computed
+        elif ms_raw is not None and pd.notna(ms_raw):
+            ms_vals[w] = float(ms_raw) / 100.0
+    all_vals = {**live_vals, **ms_vals}
+    rcols = st.columns(len(perf.ALL_WINDOWS))
+    for col, w in zip(rcols, perf.ALL_WINDOWS):
+        with col:
+            v = all_vals.get(w)
+            cp.stat_card(w, cp.fmt_pct_frac(v), sign=v)
 
 
 def _detail_fundamentals(row: pd.Series):
@@ -1389,37 +1420,72 @@ def _imported_for_ticker(ticker: str) -> list:
     return out
 
 
-def _capture_for(ticker: str, full: pd.DataFrame, perf_full: pd.DataFrame,
-                 scores: pd.DataFrame) -> dict:
-    """Build a frozen evidence snapshot reusing existing factor/timing frames."""
+def _capture_for(ticker: str, full: pd.DataFrame, scores: pd.DataFrame) -> dict:
+    """Build a frozen evidence snapshot from static frames + one ticker's history."""
     def _row(df):
         sub = df[df["Ticker"] == ticker]
         return sub.iloc[0] if not sub.empty else None
+
+    # Compute return windows from a single history fetch (not a 226-ticker sweep).
+    perf_row = None
+    if service.has_api_key() or service.has_finnhub():
+        hist = service.get_history_result(ticker)
+        series = hist.get("series", pd.Series(dtype="float64"))
+        if not series.empty:
+            live_vals = perf.live_windows_from_series(series, None, ticker=ticker)
+            ms_vals: dict = {}
+            fr = _row(full)
+            for w in perf.MS_WINDOWS:
+                computed = (perf.ytd_return(series) if w == "YTD"
+                            else perf.trailing_return(series, perf._MS_OFFSETS[w]))
+                ms_raw = fr.get(perf._MS_SOURCE[w]) if fr is not None else None
+                if computed is not None:
+                    ms_vals[w] = computed
+                elif ms_raw is not None and pd.notna(ms_raw):
+                    ms_vals[w] = float(ms_raw) / 100.0
+            perf_row = pd.Series({**live_vals, **ms_vals})
+
     return thx.capture_evidence(ticker, _row(full), _row(scores),
-                                _row(perf_full), _imported_for_ticker(ticker))
+                                perf_row, _imported_for_ticker(ticker))
 
 
-def view_thesis(full: pd.DataFrame, perf_full: pd.DataFrame, scores: pd.DataFrame):
+def view_thesis(full: pd.DataFrame, scores: pd.DataFrame):
     st.markdown('<div class="view-title">Thesis — conviction-weighted decision '
                 'log</div>', unsafe_allow_html=True)
     t_edit, t_roll = st.tabs(["Editor & journal", "Portfolio rollup"])
     with t_edit:
-        _thesis_editor(full, perf_full, scores)
+        _thesis_editor(full, scores)
     with t_roll:
         _thesis_rollup(full)
 
 
-def _thesis_editor(full: pd.DataFrame, perf_full: pd.DataFrame,
-                   scores: pd.DataFrame):
+def _thesis_editor(full: pd.DataFrame, scores: pd.DataFrame):
+    # "Theses on file" chips — clickable shortcuts to jump to a saved ticker.
+    saved = thx.list_theses()
+    if saved:
+        st.caption("Theses on file — click to load:")
+        chip_cols = st.columns(min(len(saved), 8))
+        for col, rec in zip(chip_cols, saved):
+            with col:
+                if st.button(rec["ticker"], key=f"chip_{rec['ticker']}",
+                             use_container_width=True):
+                    st.session_state["selected_ticker"] = rec["ticker"]
+                    st.session_state.pop(f"_th_seeded_{rec['ticker']}", None)
+                    st.rerun()
+
     options = full["Ticker"].tolist()
     labels = dict(zip(full["Ticker"], full["Name"]))
-    default = st.session_state.get("detail_ticker")
-    idx = options.index(default) if default in options else 0
-    ticker = st.selectbox("Ticker", options, index=idx,
-                          format_func=lambda t: f"{t} · {labels.get(t, '')}",
-                          key="thesis_ticker")
+    ticker = st.selectbox(
+        "Ticker", options, index=None,
+        placeholder="Select a ticker…",
+        format_func=lambda t: f"{t} · {labels.get(t, '')}",
+        key="selected_ticker")
 
-    evidence = _capture_for(ticker, full, perf_full, scores)
+    if ticker is None:
+        st.info("Select a ticker above to begin or edit a thesis.")
+        return
+
+    evidence = _capture_for(ticker, full, scores)
     row = full[full["Ticker"] == ticker].iloc[0]
 
     # --- Evidence panel (read-only, auto-pulled) ---
@@ -1518,7 +1584,7 @@ def _thesis_editor(full: pd.DataFrame, perf_full: pd.DataFrame,
     if st.button("Save thesis + journal entry", type="primary",
                  key=f"th_save_{ticker}"):
         cur = _current_from_state(ticker)
-        fresh = _capture_for(ticker, full, perf_full, scores)  # freeze at save
+        fresh = _capture_for(ticker, full, scores)  # freeze at save
         thx.save_thesis(ticker, cur, fresh, note=note)
         st.success(f"Saved {ticker} thesis and appended a journal entry.")
         st.rerun()
@@ -1688,41 +1754,45 @@ def main():
         menu_title=None, options=NAV_ITEMS, orientation="horizontal",
         default_index=0, key="nav", styles=styles.nav_styles())
 
-    # Build live performance once (handles missing key gracefully -> NaNs).
-    if service.has_api_key():
-        perf_full = build_performance(full)
-    else:
-        perf_full = perf.build_performance_frame(full, live=False)
+    # Universe-wide views need the full performance sweep (226 tickers).
+    # Single-ticker views (Stock Detail, Thesis, News & Filings) skip it and
+    # call service.get_history_result for only the one selected ticker.
+    UNIVERSE_VIEWS = {"Performance", "Fundamentals & Factors", "Screener",
+                      "Buckets", "Capex Cycle"}
 
-    # Bug-2 fix: cross-sectional scores must be computed on the FULL universe,
-    # then only subset for display. Momentum is a universe-relative z-score, so
-    # compute it here on all 226 names before any filter is applied.
-    perf_full = perf_full.copy()
-    perf_full["Momentum score"] = perf.blended_momentum_score(perf_full)
-
-    # ONE authoritative last price (live quote -> raw close -> Morningstar) flows
-    # from perf_full into `full`, so the displayed price AND upside-to-fair-value
-    # are consistent (no split-distorted or stale-static mismatch).
-    auth_price = perf_full.set_index("Ticker")["Last Price"]
     full = full.copy()
-    full["Last Price"] = full["Ticker"].map(auth_price).fillna(full["Last Price"])
+    if selected in UNIVERSE_VIEWS:
+        if service.has_api_key():
+            perf_full = build_performance(full)
+        else:
+            perf_full = perf.build_performance_frame(full, live=False)
 
-    # Capex-cycle timing columns (valuation_tier / value_trap / upside_fv) — now
-    # computed against the authoritative last price.
-    full = tm.add_timing_columns(full)
+        # Bug-2 fix: cross-sectional scores must be computed on the FULL universe;
+        # filtering only subsets rows for display.
+        perf_full = perf_full.copy()
+        perf_full["Momentum score"] = perf.blended_momentum_score(perf_full)
 
-    # Stash for the cached factor builder + compute scores.
-    st.session_state["_ms_full"] = full
-    st.session_state["_perf_full"] = perf_full
-    merged = full.merge(perf_full[["Ticker", "mom_3m", "mom_6m"]],
-                        on="Ticker", how="left")
-    scores = fc.compute_factor_scores(merged)
-    scores.insert(0, "Ticker", merged["Ticker"].values)
-    scores.insert(1, "Name", merged["Name"].values)
-    scores.insert(2, "Primary Bucket", merged["Primary Bucket"].values)
-    scores.insert(3, "Sector", merged["Sector"].values)
-    scores.insert(4, "Side", merged["Side"].values)
-    scores.insert(5, "Crest", merged["Crest"].values)
+        # ONE authoritative last price flows from perf_full into `full` so the
+        # displayed price and upside-to-FV are live-quote-consistent.
+        auth_price = perf_full.set_index("Ticker")["Last Price"]
+        full["Last Price"] = full["Ticker"].map(auth_price).fillna(full["Last Price"])
+        full = tm.add_timing_columns(full)
+
+        merged = full.merge(perf_full[["Ticker", "mom_3m", "mom_6m"]],
+                            on="Ticker", how="left")
+        scores = fc.compute_factor_scores(merged)
+        meta_src = merged
+    else:
+        # Single-ticker views: static Morningstar prices; Momentum factor = N/A.
+        perf_full = pd.DataFrame()
+        full = tm.add_timing_columns(full)
+        scores = fc.compute_factor_scores(full)
+        meta_src = full
+
+    # Attach metadata so the scores frame carries Ticker/Name/Bucket/Sector/Side/Crest.
+    for i, col in enumerate(["Ticker", "Name", "Primary Bucket",
+                              "Sector", "Side", "Crest"]):
+        scores.insert(i, col, meta_src[col].values)
 
     # Render only the active view (option_menu, unlike st.tabs, renders one).
     if selected == "Performance":
@@ -1736,11 +1806,11 @@ def main():
     elif selected == "Capex Cycle":
         view_capex_cycle(full, perf_full, scores)
     elif selected == "News & Filings":
-        view_news(full, perf_full, scores)
+        view_news(full)
     elif selected == "Stock Detail":
-        view_detail(full, perf_full, scores)
+        view_detail(full, scores)
     elif selected == "Thesis":
-        view_thesis(full, perf_full, scores)
+        view_thesis(full, scores)
 
 
 if __name__ == "__main__":
