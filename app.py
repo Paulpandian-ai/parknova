@@ -14,6 +14,7 @@ from streamlit_option_menu import option_menu
 
 from core import divergence as dv
 from core import factors as fc
+from core import ms_compare as mcmp
 from core import performance as perf
 from core import portfolios as pfl
 from core import signals as sig
@@ -2660,11 +2661,216 @@ def view_portfolios(full: pd.DataFrame, perf_full: pd.DataFrame,
 
 
 # ---------------------------------------------------------------------------
+# View: What Changed (diff the two most recent dated Morningstar archives)
+# ---------------------------------------------------------------------------
+@st.cache_data(show_spinner=False)
+def _load_comparison(old_path: str, new_path: str, old_date: str,
+                     new_date: str) -> dict:
+    """Load both archives via the existing loader and diff them (cached by path)."""
+    df_old = ms.load_morningstar(old_path)
+    df_new = ms.load_morningstar(new_path)
+    return mcmp.compare_snapshots(df_old, df_new, old_date, new_date)
+
+
+def _wc_pill(text: str, accent: str, bg: str) -> str:
+    return (f'<span style="font-size:0.72rem;font-weight:600;padding:1px 7px;'
+            f'border-radius:4px;background:{bg};color:{accent};">{text}</span>')
+
+
+def _wc_row(ticker: str, name: str, body_html: str, accent: str, key: str) -> None:
+    """One change row: [ticker button → Detail] + body, accent-bordered."""
+    c_btn, c_body = st.columns([1, 6])
+    with c_btn:
+        if st.button(ticker, key=key, use_container_width=True):
+            _goto_detail(ticker)
+    with c_body:
+        st.markdown(
+            f'<div class="news-item" style="border-color:{accent};margin:0;">'
+            f'<b>{cp._esc(ticker)}</b> '
+            f'<span class="muted-note">{cp._esc(name)[:36]}</span><br>{body_html}'
+            f'</div>', unsafe_allow_html=True)
+
+
+def _render_rating_changes(rows: list) -> None:
+    for i, r in enumerate(rows):
+        down = r["direction"] == "downgrade"
+        accent = styles.NEGATIVE if down else styles.SIGNAL_TEAL
+        bg = "#FEE2E2" if down else "#CCFBF1"
+        pill = _wc_pill(r["direction"].upper(), accent, bg)
+        body = (f'Rating {cp.fmt_stars(r["old"])} → {cp.fmt_stars(r["new"])} {pill}')
+        _wc_row(r["ticker"], r["name"], body, accent, f"wc_rt_{r['ticker']}_{i}")
+
+
+def _render_fv_changes(rows: list) -> None:
+    for i, r in enumerate(rows):
+        cut = r["direction"] == "cut"
+        accent = styles.NEGATIVE if cut else styles.SIGNAL_TEAL
+        bg = "#FEE2E2" if cut else "#CCFBF1"
+        pill = _wc_pill(("FV CUT" if cut else "FV RAISE"), accent, bg)
+        up_old = cp.fmt_pct_frac(r["old_upside"]) if r["old_upside"] is not None else cp.DASH
+        up_new = cp.fmt_pct_frac(r["new_upside"]) if r["new_upside"] is not None else cp.DASH
+        body = (
+            f'Fair value {cp.fmt_price(r["old"])} → {cp.fmt_price(r["new"])} '
+            f'({cp.fmt_pct_frac(r["pct_change"])}) {pill}'
+            f'<div class="muted-note" style="margin-top:2px;">'
+            f'Upside-to-FV {up_old} → {up_new} '
+            f'(analyst-side; price also moves separately)</div>')
+        _wc_row(r["ticker"], r["name"], body, accent, f"wc_fv_{r['ticker']}_{i}")
+
+
+def _render_moat_changes(rows: list) -> None:
+    for i, r in enumerate(rows):
+        narrow = r["direction"] == "narrowed"
+        accent = styles.SIGNAL_AMBER if narrow else styles.SIGNAL_TEAL
+        bg = "#FEF3C7" if narrow else "#CCFBF1"
+        pill = _wc_pill(r["direction"].upper(), accent, bg)
+        body = f'Moat {cp._esc(r["old"])} → {cp._esc(r["new"])} {pill}'
+        _wc_row(r["ticker"], r["name"], body, accent, f"wc_mt_{r['ticker']}_{i}")
+
+
+def _render_grade_changes(rows: list) -> None:
+    for i, r in enumerate(rows):
+        down = r["direction"] == "downgrade"
+        accent = styles.NEGATIVE if down else styles.SIGNAL_TEAL
+        bg = "#FEE2E2" if down else "#CCFBF1"
+        pill = _wc_pill(r["direction"].upper(), accent, bg)
+        body = (f'{cp._esc(r["field"])} {cp._esc(r["old"])} → '
+                f'{cp._esc(r["new"])} {pill}')
+        _wc_row(r["ticker"], r["name"], body, accent, f"wc_gr_{r['ticker']}_{i}")
+
+
+def _render_uncertainty_changes(rows: list) -> None:
+    for i, r in enumerate(rows):
+        rose = r["direction"] == "rose"
+        accent = styles.SIGNAL_AMBER if rose else styles.SIGNAL_TEAL
+        bg = "#FEF3C7" if rose else "#CCFBF1"
+        pill = _wc_pill(f'UNCERTAINTY {r["direction"].upper()}', accent, bg)
+        body = (f'Fair-value uncertainty {cp._esc(r["old"])} → '
+                f'{cp._esc(r["new"])} {pill}')
+        _wc_row(r["ticker"], r["name"], body, accent, f"wc_un_{r['ticker']}_{i}")
+
+
+def _render_fundamental_shifts(rows: list) -> None:
+    if not rows:
+        st.markdown('<div class="muted-note">No material fundamental shifts above '
+                    'threshold.</div>', unsafe_allow_html=True)
+        return
+    table = []
+    for r in rows:
+        if r["kind"] == "pts":
+            old_s, new_s = f'{r["old"]:.1f}', f'{r["new"]:.1f}'
+            move = f'{r["delta"]:+.1f} pts'
+        else:
+            old_s, new_s = f'{r["old"]:.2f}', f'{r["new"]:.2f}'
+            move = cp.fmt_pct_frac(r["rel"]) if r["rel"] is not None else cp.DASH
+        table.append({"Ticker": r["ticker"], "Field": r["field"],
+                      "Old": old_s, "New": new_s, "Move": move,
+                      "× over threshold": f'{r["score"]:.1f}×'})
+    st.dataframe(pd.DataFrame(table), hide_index=True, use_container_width=True)
+
+
+def _render_universe_changes(added: list, dropped: list) -> None:
+    c_add, c_drop = st.columns(2)
+    with c_add:
+        st.markdown(f'<div class="muted-note" style="font-weight:600;'
+                    f'color:{styles.SIGNAL_TEAL};">Added ({len(added)})</div>',
+                    unsafe_allow_html=True)
+        if added:
+            st.markdown('<div class="muted-note">' + ", ".join(
+                cp._esc(t) for t in added) + '</div>', unsafe_allow_html=True)
+        else:
+            st.markdown('<div class="muted-note">None.</div>',
+                        unsafe_allow_html=True)
+    with c_drop:
+        st.markdown(f'<div class="muted-note" style="font-weight:600;'
+                    f'color:{styles.SIGNAL_AMBER};">Dropped ({len(dropped)}) — '
+                    f'acquired / delisted / removed</div>', unsafe_allow_html=True)
+        if dropped:
+            st.markdown('<div class="muted-note">' + ", ".join(
+                cp._esc(t) for t in dropped) + '</div>', unsafe_allow_html=True)
+        else:
+            st.markdown('<div class="muted-note">None.</div>',
+                        unsafe_allow_html=True)
+
+
+def view_what_changed() -> None:
+    st.markdown('<div class="view-title">What Changed</div>',
+                unsafe_allow_html=True)
+
+    sel = mcmp.latest_two()
+    if sel is None:
+        n = len(mcmp.list_archives())
+        st.info(
+            f"Need at least two dated Morningstar archives to compare "
+            f"(found {n}). The comparison activates after your next refresh — "
+            f"the morningstar-refresh skill saves dated archives to "
+            f"`{mcmp.ARCHIVE_DIR}/`.")
+        return
+
+    res = _load_comparison(sel["old_path"], sel["new_path"],
+                           sel["old_date"], sel["new_date"])
+    c = res["counts"]
+
+    st.markdown(
+        f'<div class="muted-note">Comparing Morningstar exports: '
+        f'<b>{res["old_date"]}</b> → <b>{res["new_date"]}</b></div>',
+        unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="muted-note" style="margin:6px 0 4px;">'
+        f'<b>{c["ratings"]}</b> rating · <b>{c["fair_values"]}</b> fair-value · '
+        f'<b>{c["moats"]}</b> moat · <b>{c["grades"]}</b> grade · '
+        f'<b>{c["uncertainty"]}</b> uncertainty · '
+        f'<b>{c["fundamentals"]}</b> fundamental shift'
+        f'{"s" if c["fundamentals"] != 1 else ""} · '
+        f'<b>{c["added"]}</b> added · <b>{c["dropped"]}</b> dropped</div>',
+        unsafe_allow_html=True)
+    st.markdown('<div class="muted-note" style="font-style:italic;">'
+                'Factual record of what Morningstar changed — not advice. '
+                'Fair-value cuts and downgrades are shown in warning colors.</div>',
+                unsafe_allow_html=True)
+
+    # ---- Section 1 — Analyst judgment (lead) ----------------------------
+    st.markdown('<div class="section-title">Analyst judgment</div>',
+                unsafe_allow_html=True)
+    if not any((res["ratings"], res["fair_values"], res["moats"],
+                res["grades"], res["uncertainty"])):
+        st.markdown('<div class="muted-note">No analyst-judgment changes between '
+                    'these two exports.</div>', unsafe_allow_html=True)
+    if res["ratings"]:
+        st.caption("Star-rating changes (downgrades first)")
+        _render_rating_changes(res["ratings"])
+    if res["fair_values"]:
+        st.caption("Fair-value revisions (cuts first)")
+        _render_fv_changes(res["fair_values"])
+    if res["moats"]:
+        st.caption("Economic-moat changes (narrowing first)")
+        _render_moat_changes(res["moats"])
+    if res["grades"]:
+        st.caption("Letter-grade changes (downgrades first)")
+        _render_grade_changes(res["grades"])
+    if res["uncertainty"]:
+        st.caption("Fair-value uncertainty changes (rises first)")
+        _render_uncertainty_changes(res["uncertainty"])
+
+    # ---- Section 2 — Fundamental shifts ---------------------------------
+    st.markdown('<div class="section-title">Fundamental shifts</div>',
+                unsafe_allow_html=True)
+    st.caption("Material numeric moves above threshold, ranked by how far past "
+               "threshold (a new quarter's data flowing in).")
+    _render_fundamental_shifts(res["fundamentals"])
+
+    # ---- Section 3 — Universe changes -----------------------------------
+    st.markdown('<div class="section-title">Universe changes</div>',
+                unsafe_allow_html=True)
+    _render_universe_changes(res["added"], res["dropped"])
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 NAV_ITEMS = ["Performance", "Fundamentals & Factors", "Screener", "Buckets",
-             "Capex Cycle", "Signals", "Portfolios", "News & Filings",
-             "Stock Detail", "Thesis"]
+             "Capex Cycle", "Signals", "Portfolios", "What Changed",
+             "News & Filings", "Stock Detail", "Thesis"]
 
 
 def main():
@@ -2753,6 +2959,8 @@ def main():
         view_signals(full, perf_full, scores)
     elif selected == "Portfolios":
         view_portfolios(full, perf_full, scores)
+    elif selected == "What Changed":
+        view_what_changed()
     elif selected == "News & Filings":
         view_news(full)
     elif selected == "Stock Detail":
