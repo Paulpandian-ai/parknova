@@ -14,6 +14,7 @@ from streamlit_option_menu import option_menu
 
 from core import factors as fc
 from core import performance as perf
+from core import portfolios as pfl
 from core import signals as sig
 from core import store
 from core import synthesis as synth
@@ -1971,10 +1972,421 @@ def view_signals(full: pd.DataFrame, perf_full: pd.DataFrame,
 
 
 # ---------------------------------------------------------------------------
+# View: Portfolios (paper — your own decisions, no execution, no advice)
+# ---------------------------------------------------------------------------
+_PAPER_LABEL = ("Paper portfolio — your decisions, no execution. These are your "
+                "own paper trades recorded for review; nothing here is advice and "
+                "no orders are placed.")
+
+
+def _now_evidence(ticker: str, full: pd.DataFrame, scores: pd.DataFrame) -> dict:
+    """Current evidence for a ticker, cheaply (no per-position history fetch).
+
+    Reuses ``thesis.capture_evidence`` on the already-computed frames; passing
+    ``perf_row=None`` keeps it to factors/valuation/position — exactly the
+    fields the entry-vs-now comparison reads — without a price-history call.
+    """
+    def _row(df):
+        sub = df[df["Ticker"] == ticker]
+        return sub.iloc[0] if not sub.empty else None
+    return thx.capture_evidence(ticker, _row(full), _row(scores), None,
+                                _imported_for_ticker(ticker))
+
+
+def _active_signals_for(ticker: str, full: pd.DataFrame,
+                        perf_full: pd.DataFrame, scores: pd.DataFrame) -> list:
+    """Signals active for one ticker right now (reuses core.signals)."""
+    out: list = []
+    try:
+        for w in sig.stretch_warnings(full, perf_full, histories=None):
+            if w.get("ticker") == ticker:
+                out.append({"kind": "stretch", "reasons": w.get("reasons", []),
+                            "conditions": w.get("conditions")})
+        hints, _ = sig.opportunity_hints(full, perf_full, scores, "neutral")
+        for h in hints:
+            if h.get("ticker") == ticker:
+                out.append({"kind": h.get("hint_type"),
+                            "reasons": h.get("reasons", [])})
+    except Exception:
+        pass
+    return out
+
+
+def _portfolio_prices(tickers) -> dict:
+    """One live quote per unique ticker (cached). Empty when no API key."""
+    prices: dict = {}
+    if not (service.has_api_key() or service.has_finnhub()):
+        return prices
+    for t in sorted({t for t in tickers if t}):
+        try:
+            prices[t] = service.get_live_quote(t).get("price")
+        except Exception:
+            prices[t] = None
+    return prices
+
+
+def _fmt_delta_val(d: dict) -> str:
+    fmt = d.get("fmt")
+    if fmt == "pct":
+        return cp.fmt_pct_frac(d.get("now"))
+    if fmt == "bool":
+        return "yes" if d.get("now") else "no"
+    return cp.fmt_score(d.get("now"))
+
+
+def _fmt_delta_entry(d: dict) -> str:
+    fmt = d.get("fmt")
+    if fmt == "pct":
+        return cp.fmt_pct_frac(d.get("entry"))
+    if fmt == "bool":
+        return "yes" if d.get("entry") else "no"
+    return cp.fmt_score(d.get("entry"))
+
+
+def _render_position_detail(pos: dict, full: pd.DataFrame,
+                            scores: pd.DataFrame) -> None:
+    """Entry-vs-now thesis-held comparison + frozen evidence for one position."""
+    entry_ev = (pos.get("thesis_at_entry") or {}).get("evidence", {})
+    now_ev = _now_evidence(pos["ticker"], full, scores)
+    held = pfl.thesis_held(entry_ev, now_ev)
+
+    st.markdown(
+        f'Thesis-held: {cp.thesis_held_chip(held["status"])}',
+        unsafe_allow_html=True)
+    rationale = (pos.get("thesis_at_entry") or {}).get("rationale")
+    if rationale:
+        st.caption(f"Rationale at entry: {cp._esc(rationale)}")
+
+    if held["deltas"]:
+        rows = [{"Metric": d["label"], "At entry": _fmt_delta_entry(d),
+                 "Now": _fmt_delta_val(d),
+                 "Direction": ("improved" if d["dir"] > 0 else
+                               "weakened" if d["dir"] < 0 else "flat")}
+                for d in held["deltas"]]
+        st.dataframe(pd.DataFrame(rows), hide_index=True,
+                     use_container_width=True)
+    else:
+        st.caption("No comparable entry-vs-now metrics available.")
+
+    sigs = (pos.get("thesis_at_entry") or {}).get("signals", [])
+    if sigs:
+        labels = []
+        for s in sigs:
+            labels.append(f"{s.get('kind')}: " + "; ".join(s.get("reasons", [])))
+        st.caption("Signals active at entry — " + " · ".join(labels))
+
+
+def _render_positions(record: dict, full: pd.DataFrame, scores: pd.DataFrame,
+                      prices: dict) -> None:
+    positions = record.get("positions", [])
+    open_pos = [p for p in positions if p.get("status") == "open"]
+    closed_pos = [p for p in positions if p.get("status") == "closed"]
+
+    if not positions:
+        st.info("No positions yet — add one below to start this paper portfolio.")
+        return
+
+    st.markdown('<div class="section-title">Open positions</div>',
+                unsafe_allow_html=True)
+    if not open_pos:
+        st.caption("No open positions.")
+    for pos in open_pos:
+        price = prices.get(pos["ticker"])
+        pnl = pfl.position_pnl(pos, price)
+        ret = pnl["return_pct"]
+        ret_txt = cp.fmt_pct_frac(ret) if ret is not None else cp.DASH
+        dol = (cp.fmt_price(pnl["dollar_pnl"]) if pnl["dollar_pnl"] is not None
+               else cp.DASH)
+        title = (f'{pos["ticker"]} · {pos["action"]} {pos["shares"]:g} @ '
+                 f'{cp.fmt_price(pos["entry_price"])}  →  '
+                 f'{cp.fmt_price(price) if price is not None else "no price"}  '
+                 f'({ret_txt}, {dol})')
+        with st.expander(title, expanded=False):
+            _render_position_detail(pos, full, scores)
+            cc = st.columns([2, 1])
+            with cc[0]:
+                exit_px = st.number_input(
+                    "Exit price", min_value=0.0,
+                    value=float(price) if price else float(pos["entry_price"]),
+                    step=0.01, key=f"exit_px_{pos['id']}")
+            with cc[1]:
+                st.write("")
+                st.write("")
+                if st.button("Close position", key=f"close_{pos['id']}",
+                             use_container_width=True):
+                    pfl.close_position(record["portfolio_id"], pos["id"], exit_px)
+                    st.rerun()
+
+    if closed_pos:
+        st.markdown('<div class="section-title">Closed positions (realized)</div>',
+                    unsafe_allow_html=True)
+        rows = []
+        for pos in closed_pos:
+            pnl = pfl.position_pnl(pos, None)
+            rows.append({
+                "Ticker": pos["ticker"], "Action": pos["action"],
+                "Shares": pos["shares"],
+                "Entry": cp.fmt_price(pos["entry_price"]),
+                "Exit": cp.fmt_price(pos.get("exit_price")),
+                "Realized %": cp.fmt_pct_frac(pnl["return_pct"])
+                if pnl["return_pct"] is not None else cp.DASH,
+                "Realized $": cp.fmt_price(pnl["dollar_pnl"])
+                if pnl["dollar_pnl"] is not None else cp.DASH,
+            })
+        st.dataframe(pd.DataFrame(rows), hide_index=True,
+                     use_container_width=True)
+
+
+def _render_add_position(record: dict, full: pd.DataFrame,
+                         perf_full: pd.DataFrame, scores: pd.DataFrame) -> None:
+    st.markdown('<div class="section-title">Add a paper position</div>',
+                unsafe_allow_html=True)
+    options = full["Ticker"].tolist()
+    labels = dict(zip(full["Ticker"], full["Name"]))
+    c1, c2, c3 = st.columns([2, 1, 1])
+    with c1:
+        ticker = st.selectbox(
+            "Ticker", options, index=None, placeholder="Select a ticker…",
+            format_func=lambda t: f"{t} · {labels.get(t, '')}",
+            key=f"add_tk_{record['portfolio_id']}")
+    with c2:
+        action = st.radio("Action", ["BUY", "SELL"], horizontal=True,
+                          key=f"add_act_{record['portfolio_id']}")
+    with c3:
+        shares = st.number_input("Shares", min_value=0.0, value=100.0, step=1.0,
+                                 key=f"add_sh_{record['portfolio_id']}")
+
+    # Default entry price to the current live price (editable for backdating).
+    default_px = 0.0
+    if ticker is not None:
+        live = service.get_live_quote(ticker).get("price") \
+            if (service.has_api_key() or service.has_finnhub()) else None
+        if live is None:
+            sub = full[full["Ticker"] == ticker]
+            live = float(sub.iloc[0].get("Last Price")) if not sub.empty else None
+        default_px = float(live) if live else 0.0
+
+    c4, c5 = st.columns([1, 1])
+    with c4:
+        entry_px = st.number_input(
+            "Entry price (defaults to live; edit to backdate)", min_value=0.0,
+            value=default_px, step=0.01, key=f"add_px_{record['portfolio_id']}")
+    with c5:
+        conviction = st.slider("Conviction", 1, 10, 6,
+                               key=f"add_cv_{record['portfolio_id']}")
+    stance = st.selectbox("Stance", thx.STANCES, index=0,
+                          key=f"add_st_{record['portfolio_id']}")
+    rationale = st.text_area("Rationale (optional)", height=68,
+                             key=f"add_rt_{record['portfolio_id']}")
+
+    if st.button("Record paper position", type="primary",
+                 disabled=(ticker is None or entry_px <= 0),
+                 key=f"add_go_{record['portfolio_id']}"):
+        # Freeze the evidence snapshot (one history fetch) + active signals.
+        evidence = _capture_for(ticker, full, scores)
+        signals = _active_signals_for(ticker, full, perf_full, scores)
+        pfl.open_position(
+            record["portfolio_id"], ticker, action, shares, entry_px,
+            thesis_at_entry={"evidence": evidence, "signals": signals},
+            rationale=rationale, stance=stance, conviction=conviction)
+        st.success(f"Recorded paper {action} {shares:g} {ticker} "
+                   f"@ {cp.fmt_price(entry_px)} — evidence frozen at entry.")
+        st.rerun()
+
+
+def _render_versions(record: dict) -> None:
+    st.markdown('<div class="section-title">Version history</div>',
+                unsafe_allow_html=True)
+    st.caption("Save a labeled snapshot of the whole portfolio, then diff any "
+               "past version against the current state.")
+    vc1, vc2 = st.columns([2, 1])
+    with vc1:
+        label = st.text_input("Version label", placeholder="e.g. Initial build",
+                              key=f"ver_lbl_{record['portfolio_id']}")
+    with vc2:
+        st.write("")
+        st.write("")
+        if st.button("Save version", key=f"ver_save_{record['portfolio_id']}",
+                     use_container_width=True):
+            pfl.save_version(record["portfolio_id"], label)
+            st.rerun()
+
+    versions = record.get("versions", [])
+    if not versions:
+        st.info("No versions saved yet.")
+        return
+
+    opts = {f'v{v["version"]} — {v["label"]} ({v["ts"][:10]})': v
+            for v in versions}
+    pick = st.selectbox("View / diff a version", list(opts.keys()),
+                        key=f"ver_pick_{record['portfolio_id']}")
+    chosen = opts[pick]
+    snap_positions = chosen["snapshot"].get("positions", [])
+    diff = pfl.diff_versions(snap_positions, record.get("positions", []))
+
+    st.markdown("**Changes since this version**")
+    dc = st.columns(3)
+    with dc[0]:
+        cp.stat_card("Added since", str(len(diff["added"])))
+    with dc[1]:
+        cp.stat_card("Closed since", str(len(diff["closed"])))
+    with dc[2]:
+        cp.stat_card("Resized since", str(len(diff["resized"])))
+    if diff["added"]:
+        st.caption("Added: " + ", ".join(p["ticker"] for p in diff["added"]))
+    if diff["closed"]:
+        st.caption("Closed: " + ", ".join(p["ticker"] for p in diff["closed"]))
+    if diff["resized"]:
+        st.caption("Resized: " + ", ".join(
+            f'{r["ticker"]} {r["from"]:g}→{r["to"]:g}' for r in diff["resized"]))
+
+    st.markdown("**Positions in this version**")
+    if snap_positions:
+        rows = [{"Ticker": p["ticker"], "Action": p["action"],
+                 "Shares": p["shares"], "Entry": cp.fmt_price(p["entry_price"]),
+                 "Status": p["status"]} for p in snap_positions]
+        st.dataframe(pd.DataFrame(rows), hide_index=True,
+                     use_container_width=True)
+    else:
+        st.caption("This version had no positions.")
+
+
+def _render_compare(prices_all: dict) -> None:
+    st.markdown('<div class="section-title">Compare portfolios</div>',
+                unsafe_allow_html=True)
+    idx = pfl.list_portfolios()
+    if len(idx) < 2:
+        st.info("Create at least two portfolios to compare strategies.")
+        return
+    name_by_id = {e["portfolio_id"]: e["name"] for e in idx}
+    picked = st.multiselect(
+        "Select portfolios to compare", list(name_by_id.keys()),
+        default=list(name_by_id.keys())[:2],
+        format_func=lambda pid: name_by_id.get(pid, pid), key="cmp_pick")
+    if len(picked) < 2:
+        st.caption("Pick two or more.")
+        return
+    records = [pfl.read_portfolio(pid) for pid in picked]
+    records = [r for r in records if r]
+    rows = pfl.compare_portfolios(records, prices_all)
+    table = [{
+        "Portfolio": r["name"],
+        "Total return": cp.fmt_pct_frac(r["total_pct"])
+        if r["total_pct"] is not None else cp.DASH,
+        "Total P&L": cp.fmt_price(r["total_pnl"]),
+        "Win rate": cp.fmt_pct_frac(r["win_rate"], signed=False)
+        if r["win_rate"] is not None else cp.DASH,
+        "Conviction-wtd return": cp.fmt_pct_frac(r["conviction_weighted_return"])
+        if r["conviction_weighted_return"] is not None else cp.DASH,
+        "Open": r["open_n"], "Closed": r["closed_n"],
+        "Top crest": r["top_crest"] or cp.DASH,
+        "Top side": r["top_side"] or cp.DASH,
+    } for r in rows]
+    st.dataframe(pd.DataFrame(table), hide_index=True, use_container_width=True)
+    st.caption("Factual side-by-side only — returns and hit rates. Which "
+               "strategy fits your goals is your call.")
+
+
+def view_portfolios(full: pd.DataFrame, perf_full: pd.DataFrame,
+                    scores: pd.DataFrame) -> None:
+    st.markdown('<div class="view-title">Portfolios</div>',
+                unsafe_allow_html=True)
+    st.markdown(f'<div class="muted-note" style="margin-bottom:10px;">'
+                f'{_PAPER_LABEL}</div>', unsafe_allow_html=True)
+
+    idx = pfl.list_portfolios()
+
+    # --- Selector + create + delete -------------------------------------
+    sel_col, new_col = st.columns([3, 2])
+    with sel_col:
+        if idx:
+            ids = [e["portfolio_id"] for e in idx]
+            names = {e["portfolio_id"]: e["name"] for e in idx}
+            active_id = st.selectbox(
+                "Portfolio", ids, format_func=lambda p: names.get(p, p),
+                key="pf_active")
+        else:
+            active_id = None
+            st.info("No portfolios yet — create one to begin.")
+    with new_col:
+        with st.popover("New portfolio", use_container_width=True):
+            nm = st.text_input("Name", key="pf_new_name",
+                               placeholder="e.g. Value Tilt")
+            note = st.text_area("Strategy note", key="pf_new_note", height=68,
+                                placeholder="e.g. Buy below fair value, "
+                                            "ignore momentum")
+            if st.button("Create", type="primary", key="pf_new_go",
+                         disabled=not nm.strip()):
+                rec = pfl.create_portfolio(nm, note)
+                st.session_state["pf_active"] = rec["portfolio_id"]
+                st.rerun()
+
+    if active_id is None:
+        # Still offer the compare tab framing (will show its own empty state).
+        _render_compare({})
+        return
+
+    record = pfl.read_portfolio(active_id)
+    if record is None:
+        st.warning("Could not load that portfolio.")
+        return
+
+    # Prices: one live quote per unique ticker in this portfolio (cached).
+    tickers = [p["ticker"] for p in record.get("positions", [])]
+    prices = _portfolio_prices(tickers)
+    summary = pfl.portfolio_summary(record, prices)
+
+    # --- Header strip ----------------------------------------------------
+    if record.get("strategy_note"):
+        st.caption(cp._esc(record["strategy_note"]))
+    h = st.columns(5)
+    with h[0]:
+        cp.stat_card("Total value", cp.fmt_price(summary["total_value"]))
+    with h[1]:
+        cp.stat_card("Total P&L", cp.fmt_price(summary["total_pnl"]),
+                     cp.fmt_pct_frac(summary["total_pct"])
+                     if summary["total_pct"] is not None else "",
+                     sign=summary["total_pnl"])
+    with h[2]:
+        cp.stat_card("Open", str(summary["open_n"]))
+    with h[3]:
+        cp.stat_card("Closed", str(summary["closed_n"]),
+                     f'win rate {cp.fmt_pct_frac(summary["win_rate"], signed=False)}'
+                     if summary["win_rate"] is not None else "")
+    with h[4]:
+        cp.stat_card("Top exposure",
+                     pfl.top_exposure(summary, "Crest") or cp.DASH)
+
+    if not prices and tickers:
+        st.caption("Live prices unavailable (no API key) — P&L shows once a "
+                   "price source is configured. Closed positions still settle "
+                   "on their recorded exit price.")
+
+    tab_pos, tab_ver, tab_cmp = st.tabs(
+        ["Positions", "Versions", "Compare"])
+    with tab_pos:
+        _render_positions(record, full, scores, prices)
+        st.divider()
+        _render_add_position(record, full, perf_full, scores)
+        st.divider()
+        with st.popover("Delete this portfolio"):
+            st.caption("This permanently removes the portfolio and its history.")
+            if st.button("Confirm delete", key=f"del_{active_id}"):
+                pfl.delete_portfolio(active_id)
+                st.session_state.pop("pf_active", None)
+                st.rerun()
+    with tab_ver:
+        _render_versions(record)
+    with tab_cmp:
+        _render_compare(prices)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 NAV_ITEMS = ["Performance", "Fundamentals & Factors", "Screener", "Buckets",
-             "Capex Cycle", "Signals", "News & Filings", "Stock Detail", "Thesis"]
+             "Capex Cycle", "Signals", "Portfolios", "News & Filings",
+             "Stock Detail", "Thesis"]
 
 
 def main():
@@ -2009,7 +2421,7 @@ def main():
     # Single-ticker views (Stock Detail, Thesis, News & Filings) skip it and
     # call service.get_history_result for only the one selected ticker.
     UNIVERSE_VIEWS = {"Performance", "Fundamentals & Factors", "Screener",
-                      "Buckets", "Capex Cycle", "Signals"}
+                      "Buckets", "Capex Cycle", "Signals", "Portfolios"}
 
     full = full.copy()
     if selected in UNIVERSE_VIEWS:
@@ -2058,6 +2470,8 @@ def main():
         view_capex_cycle(full, perf_full, scores)
     elif selected == "Signals":
         view_signals(full, perf_full, scores)
+    elif selected == "Portfolios":
+        view_portfolios(full, perf_full, scores)
     elif selected == "News & Filings":
         view_news(full)
     elif selected == "Stock Detail":
