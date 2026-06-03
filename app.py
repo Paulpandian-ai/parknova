@@ -107,6 +107,9 @@ def settings_popover() -> None:
     with st.popover("Settings", use_container_width=True):
         if st.button("Refresh live data", width="stretch"):
             service.clear_live_caches()
+            # Also drop the session-state universe frame so it rebuilds (Issue 2).
+            st.session_state.pop("_perf_full_frame", None)
+            st.session_state.pop("_perf_full_ts", None)
             st.success("Live caches cleared.")
             st.rerun()
 
@@ -335,6 +338,35 @@ def build_performance(full: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# The assembled 226-name momentum frame is expensive to rebuild on every tab
+# flip even though its underlying history/quote fetches are @st.cache_data-cached
+# (the 226-row assembly + factor pass still runs). Cache the built frame in
+# session_state so switching to a universe view is near-instant after the first
+# load; rebuild only on (a) manual "Refresh live data", (b) TTL expiry. The live
+# *price* refresh (Performance fragment) is separate and far cheaper — it polls
+# only the top-N visible quotes, never this whole sweep (momentum windows don't
+# need second-by-second freshness; intraday TTL is plenty).
+PERF_FRAME_TTL = 900  # 15 min, matches the history/quote cache TTL
+
+
+def get_perf_full(full: pd.DataFrame) -> pd.DataFrame:
+    """Universe performance frame, memoized in session_state across reruns."""
+    import time
+    cached = st.session_state.get("_perf_full_frame")
+    ts = st.session_state.get("_perf_full_ts", 0.0)
+    if cached is not None and (time.time() - ts) < PERF_FRAME_TTL:
+        return cached
+    if service.has_api_key():
+        df = build_performance(full)
+    else:
+        df = perf.build_performance_frame(full, live=False)
+    df = df.copy()
+    df["Momentum score"] = perf.blended_momentum_score(df)
+    st.session_state["_perf_full_frame"] = df
+    st.session_state["_perf_full_ts"] = time.time()
+    return df
+
+
 # ---------------------------------------------------------------------------
 # View: Performance
 # ---------------------------------------------------------------------------
@@ -376,13 +408,6 @@ def view_performance(full: pd.DataFrame, perf_full: pd.DataFrame):
         else:
             cp.stat_card(f"Worst ({sel})", cp.DASH)
 
-    # Live "Today" strip for the top visible names (only these poll live).
-    if service.has_finnhub() or service.has_api_key():
-        top_live = (df.sort_values(sel, ascending=False, na_position="last")
-                    ["Ticker"].head(8).tolist())
-        with st.expander("Live quotes — top names", expanded=False):
-            live_ticker_strip(top_live)
-
     st.write("")
     t_table, t_mom, t_heat = st.tabs(["Returns table", "Momentum rank",
                                       "Heatmap"])
@@ -401,11 +426,45 @@ def view_performance(full: pd.DataFrame, perf_full: pd.DataFrame):
         cp.heatmap(mat, perf.ALL_WINDOWS, pct_fraction=True)
 
 
-def _performance_table(df: pd.DataFrame, sort_win: str):
+# Live-quote overlay is scoped to the top-N sorted rows so the Performance
+# table's price/Today match Stock Detail (same get_live_quote source) and refresh
+# on the interval, WITHOUT polling all 226 names. 15 rows at the 15s default ≈ 60
+# Finnhub calls/min — within the free tier. The remaining rows show last close.
+PERF_LIVE_TOP_N = 15
+
+
+def _overlay_live_quotes(df: pd.DataFrame, tickers: list) -> tuple:
+    """Overlay get_live_quote onto Last Price/Today for ``tickers`` only.
+
+    Returns (overlaid_df, modes) where modes is the set of quote modes seen
+    ('live' / 'last close'). Uses the SAME cached get_live_quote as Stock Detail,
+    so the two views show the identical number for a given ticker at a moment.
+    """
+    out = df.copy()
+    if "Today" not in out.columns:
+        out["Today"] = np.nan
+    lp = dict(zip(out["Ticker"], out["Last Price"]))
+    today = dict(zip(out["Ticker"], out["Today"]))
+    modes = set()
+    for t in tickers:
+        q = service.get_live_quote(t)
+        if q.get("price") is not None:
+            lp[t] = q["price"]
+        if q.get("pct") is not None:
+            today[t] = q["pct"]
+        if q.get("mode"):
+            modes.add(q["mode"])
+    out["Last Price"] = out["Ticker"].map(lp)
+    out["Today"] = out["Ticker"].map(today)
+    return out, modes
+
+
+def _render_perf_styler(view_df: pd.DataFrame, sort_win: str):
     cols = (["Ticker", "Name", "Primary Bucket", "Side", "Crest", "Last Price"]
             + perf.ALL_WINDOWS)
-    cols = [c for c in cols if c in df.columns]
-    view = df[cols].sort_values(by=sort_win, ascending=False, na_position="last")
+    cols = [c for c in cols if c in view_df.columns]
+    view = view_df[cols].sort_values(by=sort_win, ascending=False,
+                                     na_position="last")
     fmt = {"Last Price": cp.fmt_price}
     for w in perf.ALL_WINDOWS:
         fmt[w] = lambda v: cp.fmt_pct_frac(v)
@@ -418,6 +477,45 @@ def _performance_table(df: pd.DataFrame, sort_win: str):
               .set_properties(**{"font-size": "0.88rem"})
               .set_properties(subset=num_cols, **{"text-align": "right"}))
     st.dataframe(styler, width="stretch", hide_index=True, height=560)
+
+
+def _performance_table(df: pd.DataFrame, sort_win: str):
+    """Returns table with a live price/Today overlay on the top-N sorted rows.
+
+    The overlay polls get_live_quote (same source as Stock Detail) for only the
+    top-N visible rows, refreshing on the Settings interval via st.fragment — the
+    same pattern Stock Detail uses. 'Off' renders once (no polling).
+    """
+    has_live = service.has_finnhub() or service.has_api_key()
+    top_live = (df.sort_values(sort_win, ascending=False, na_position="last")
+                ["Ticker"].head(PERF_LIVE_TOP_N).tolist()) if has_live else []
+
+    def _render():
+        import datetime as _dt
+        if top_live:
+            view_df, modes = _overlay_live_quotes(df, top_live)
+            now = _dt.datetime.now().strftime("%H:%M:%S")
+            if "live" in modes:
+                tag = (f"live · top {len(top_live)} rows · updated {now} "
+                       f"(other rows show last close)")
+            elif modes == {"last close"}:
+                tag = f"last close · top {len(top_live)} rows"
+            else:
+                tag = f"updated {now}"
+            st.markdown(f'<div class="muted-note">{tag}</div>',
+                        unsafe_allow_html=True)
+        else:
+            view_df = df
+        _render_perf_styler(view_df, sort_win)
+
+    interval = _live_interval() if top_live else None
+    if interval is None:
+        _render()
+    else:
+        @st.fragment(run_every=interval)
+        def _frag():
+            _render()
+        _frag()
 
 
 def _momentum_rank(df: pd.DataFrame):
@@ -2430,15 +2528,9 @@ def main():
 
     full = full.copy()
     if selected in UNIVERSE_VIEWS:
-        if service.has_api_key():
-            perf_full = build_performance(full)
-        else:
-            perf_full = perf.build_performance_frame(full, live=False)
-
-        # Bug-2 fix: cross-sectional scores must be computed on the FULL universe;
-        # filtering only subsets rows for display.
-        perf_full = perf_full.copy()
-        perf_full["Momentum score"] = perf.blended_momentum_score(perf_full)
+        # Memoized in session_state (Issue 2): near-instant tab flips; rebuilds
+        # only on manual refresh or TTL expiry. Momentum score is already on it.
+        perf_full = get_perf_full(full)
 
         # ONE authoritative last price flows from perf_full into `full` so the
         # displayed price and upside-to-FV are live-quote-consistent.

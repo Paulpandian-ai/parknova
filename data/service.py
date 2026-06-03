@@ -185,8 +185,16 @@ def _eod_change(ticker: str) -> Optional[dict]:
     return last_session_change(series)
 
 
+@st.cache_data(ttl=QUOTE_TTL, show_spinner=False)
 def get_live_quote(ticker: str) -> dict:
     """Return ``{price, pct, source, mode, as_of, error}`` for one ticker.
+
+    The single source of truth for a ticker's displayed price/Today across the
+    whole app (Stock Detail card AND the Performance table both call this), so
+    the two never disagree. Cached at QUOTE_TTL (~15s) so repeated calls within
+    a render — or back-to-back across views — return the identical quote object
+    without re-hitting Finnhub/FMP, and the fragment poll picks up fresh values
+    only after the TTL lapses (rate-limit safe).
 
     "Today" precedence so the value is meaningful 24/7:
       1. live intraday — Finnhub dp that is non-null AND non-zero (market open);
