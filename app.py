@@ -2797,14 +2797,12 @@ def view_what_changed() -> None:
     st.markdown('<div class="view-title">What Changed</div>',
                 unsafe_allow_html=True)
 
-    sel = mcmp.latest_two()
+    sel = mcmp.latest_archive_and_working()
     if sel is None:
-        n = len(mcmp.list_archives())
         st.info(
-            f"Need at least two dated Morningstar archives to compare "
-            f"(found {n}). The comparison activates after your next refresh — "
-            f"the morningstar-refresh skill saves dated archives to "
-            f"`{mcmp.ARCHIVE_DIR}/`.")
+            "No dated archive yet to compare against. Archive your current file "
+            "(save a dated copy to `" + mcmp.ARCHIVE_DIR + "/`) before your next "
+            "refresh, and the comparison will show what changed.")
         return
 
     res = _load_comparison(sel["old_path"], sel["new_path"],
@@ -2812,9 +2810,18 @@ def view_what_changed() -> None:
     c = res["counts"]
 
     st.markdown(
-        f'<div class="muted-note">Comparing Morningstar exports: '
-        f'<b>{res["old_date"]}</b> → <b>{res["new_date"]}</b></div>',
+        f'<div class="muted-note">Comparing archive <b>{res["old_date"]}</b> '
+        f'→ <b>current working file</b></div>',
         unsafe_allow_html=True)
+
+    # Identical snapshots (e.g. just archived, not yet refreshed) is not an error.
+    if not mcmp.has_changes(res):
+        st.success(
+            f"No changes detected — the latest archive ({res['old_date']}) "
+            f"matches the current working file. Differences will appear after "
+            f"your next data refresh.")
+        return
+
     st.markdown(
         f'<div class="muted-note" style="margin:6px 0 4px;">'
         f'<b>{c["ratings"]}</b> rating · <b>{c["fair_values"]}</b> fair-value · '

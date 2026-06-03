@@ -28,7 +28,10 @@ import pandas as pd
 # Archive discovery
 # ---------------------------------------------------------------------------
 ARCHIVE_DIR = os.path.join("data", "morningstar_archive")
-ARCHIVE_GLOB = "AI_Equities_Universe_Data_from_MorningStar_*.xlsx"
+# Match any dated .xlsx in the archive dir by its trailing YYYY-MM-DD — tolerant
+# of space vs underscore in the stem (..._from MorningStar_DATE.xlsx and
+# ..._from_MorningStar_DATE.xlsx both qualify). The date filter does the work.
+ARCHIVE_GLOB = "*.xlsx"
 _DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 
 # ---------------------------------------------------------------------------
@@ -94,17 +97,28 @@ def list_archives(root: str = ARCHIVE_DIR) -> List[Tuple[str, str]]:
     return out
 
 
-def latest_two(root: str = ARCHIVE_DIR) -> Optional[Dict[str, str]]:
-    """The two most recent archives, or None when fewer than two exist.
+def working_file_path() -> str:
+    """Path to the current working Morningstar export the app already loads."""
+    from data import morningstar as ms
+    return ms._excel_path()
 
-    Returns ``{old_date, old_path, new_date, new_path}``.
+
+def latest_archive_and_working(root: str = ARCHIVE_DIR) -> Optional[Dict[str, str]]:
+    """Selector for the What Changed view: most-recent archive vs working file.
+
+    Prior snapshot (old) = the single most-recent dated archive in ``root``.
+    Latest snapshot (new) = the current working file at the repo root (the
+    no-date export the app already loads). Returns
+    ``{old_date, old_path, new_date, new_path}`` with ``new_date`` a label
+    ("current working file"), or None when there are zero dated archives.
     """
     archives = list_archives(root)
-    if len(archives) < 2:
+    if not archives:
         return None
-    (old_date, old_path), (new_date, new_path) = archives[-2], archives[-1]
+    old_date, old_path = archives[-1]   # max trailing date
     return {"old_date": old_date, "old_path": old_path,
-            "new_date": new_date, "new_path": new_path}
+            "new_date": "current working file",
+            "new_path": working_file_path()}
 
 
 # ---------------------------------------------------------------------------
@@ -263,3 +277,8 @@ def _counts(result: Dict[str, Any]) -> Dict[str, int]:
     return {k: len(result[k]) for k in
             ("ratings", "moats", "fair_values", "grades", "uncertainty",
              "fundamentals", "added", "dropped")}
+
+
+def has_changes(result: Dict[str, Any]) -> bool:
+    """True if any change group is non-empty (identical snapshots -> False)."""
+    return any(v > 0 for v in result.get("counts", {}).values())
