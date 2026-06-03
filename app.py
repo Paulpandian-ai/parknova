@@ -2666,88 +2666,141 @@ def view_portfolios(full: pd.DataFrame, perf_full: pd.DataFrame,
 @st.cache_data(show_spinner=False)
 def _load_comparison(old_path: str, new_path: str, old_date: str,
                      new_date: str) -> dict:
-    """Load both archives via the existing loader and diff them (cached by path)."""
+    """Load both archives via the existing loader and diff them (cached by path).
+
+    Attaches a presentation-only ``meta`` map (ticker -> bucket/crest) sourced
+    from the working-file frame (which carries the curated taxonomies) so the
+    tables can show Bucket/Crest. compare_snapshots itself is untouched.
+    """
     df_old = ms.load_morningstar(old_path)
     df_new = ms.load_morningstar(new_path)
-    return mcmp.compare_snapshots(df_old, df_new, old_date, new_date)
+    res = mcmp.compare_snapshots(df_old, df_new, old_date, new_date)
+    meta = {}
+    for _, row in df_new.iterrows():
+        meta[str(row.get("Ticker"))] = {"bucket": row.get("Primary Bucket"),
+                                        "crest": row.get("Crest")}
+    res["meta"] = meta
+    return res
 
 
-def _wc_pill(text: str, accent: str, bg: str) -> str:
-    return (f'<span style="font-size:0.72rem;font-weight:600;padding:1px 7px;'
-            f'border-radius:4px;background:{bg};color:{accent};">{text}</span>')
+# Direction tints for the dataframe styler (subtle, not full-row shouting).
+_WC_NEG_TINT = "#FEE2E2"   # downgrade / cut / narrowing / rising uncertainty
+_WC_POS_TINT = "#CCFBF1"   # upgrade / raise / widening / falling uncertainty
 
 
-def _wc_row(ticker: str, name: str, body_html: str, accent: str, key: str) -> None:
-    """One change row: [ticker button → Detail] + body, accent-bordered."""
-    c_btn, c_body = st.columns([1, 6])
-    with c_btn:
-        if st.button(ticker, key=key, use_container_width=True):
-            _goto_detail(ticker)
-    with c_body:
-        st.markdown(
-            f'<div class="news-item" style="border-color:{accent};margin:0;">'
-            f'<b>{cp._esc(ticker)}</b> '
-            f'<span class="muted-note">{cp._esc(name)[:36]}</span><br>{body_html}'
-            f'</div>', unsafe_allow_html=True)
+def _wc_heading(text: str, accent: str) -> None:
+    st.markdown(f'<div class="muted-note" style="font-weight:700;color:{accent};'
+                f'margin:8px 0 2px;">{text}</div>', unsafe_allow_html=True)
 
 
-def _render_rating_changes(rows: list) -> None:
-    for i, r in enumerate(rows):
-        down = r["direction"] == "downgrade"
-        accent = styles.NEGATIVE if down else styles.SIGNAL_TEAL
-        bg = "#FEE2E2" if down else "#CCFBF1"
-        pill = _wc_pill(r["direction"].upper(), accent, bg)
-        body = (f'Rating {cp.fmt_stars(r["old"])} → {cp.fmt_stars(r["new"])} {pill}')
-        _wc_row(r["ticker"], r["name"], body, accent, f"wc_rt_{r['ticker']}_{i}")
+def _wc_bc(meta: dict, ticker: str) -> tuple:
+    """(bucket, crest) for a ticker from the working-file meta map."""
+    m = (meta or {}).get(ticker, {})
+    return (m.get("bucket") or cp.DASH, m.get("crest") or cp.DASH)
 
 
-def _render_fv_changes(rows: list) -> None:
-    for i, r in enumerate(rows):
-        cut = r["direction"] == "cut"
-        accent = styles.NEGATIVE if cut else styles.SIGNAL_TEAL
-        bg = "#FEE2E2" if cut else "#CCFBF1"
-        pill = _wc_pill(("FV CUT" if cut else "FV RAISE"), accent, bg)
-        up_old = cp.fmt_pct_frac(r["old_upside"]) if r["old_upside"] is not None else cp.DASH
-        up_new = cp.fmt_pct_frac(r["new_upside"]) if r["new_upside"] is not None else cp.DASH
-        body = (
-            f'Fair value {cp.fmt_price(r["old"])} → {cp.fmt_price(r["new"])} '
-            f'({cp.fmt_pct_frac(r["pct_change"])}) {pill}'
-            f'<div class="muted-note" style="margin-top:2px;">'
-            f'Upside-to-FV {up_old} → {up_new} '
-            f'(analyst-side; price also moves separately)</div>')
-        _wc_row(r["ticker"], r["name"], body, accent, f"wc_fv_{r['ticker']}_{i}")
+def _render_rating_tables(rows: list, meta: dict) -> None:
+    downs = sorted([r for r in rows if r["direction"] == "downgrade"],
+                   key=lambda r: r["delta"])          # biggest drop first
+    ups = sorted([r for r in rows if r["direction"] == "upgrade"],
+                 key=lambda r: -r["delta"])           # biggest gain first
+    _rating_table(downs, "Rating downgrades", styles.NEGATIVE, _WC_NEG_TINT, meta)
+    _rating_table(ups, "Rating upgrades", styles.SIGNAL_TEAL, _WC_POS_TINT, meta)
 
 
-def _render_moat_changes(rows: list) -> None:
-    for i, r in enumerate(rows):
-        narrow = r["direction"] == "narrowed"
-        accent = styles.SIGNAL_AMBER if narrow else styles.SIGNAL_TEAL
-        bg = "#FEF3C7" if narrow else "#CCFBF1"
-        pill = _wc_pill(r["direction"].upper(), accent, bg)
-        body = f'Moat {cp._esc(r["old"])} → {cp._esc(r["new"])} {pill}'
-        _wc_row(r["ticker"], r["name"], body, accent, f"wc_mt_{r['ticker']}_{i}")
+def _rating_table(rows: list, title: str, accent: str, tint: str,
+                  meta: dict) -> None:
+    if not rows:
+        st.markdown(f'<div class="muted-note">No {title.lower()}.</div>',
+                    unsafe_allow_html=True)
+        return
+    _wc_heading(f"{title} ({len(rows)})", accent)
+    recs = []
+    for r in rows:
+        b, c = _wc_bc(meta, r["ticker"])
+        recs.append({"Ticker": r["ticker"], "Name": str(r["name"])[:32],
+                     "Old → New": f'{int(round(r["old"]))}★ → '
+                                  f'{int(round(r["new"]))}★',
+                     "Bucket": b, "Crest": c})
+    df = pd.DataFrame(recs)
+    styler = df.style.set_properties(
+        subset=["Old → New"], **{"background-color": tint})
+    st.dataframe(styler, hide_index=True, use_container_width=True)
 
 
-def _render_grade_changes(rows: list) -> None:
-    for i, r in enumerate(rows):
-        down = r["direction"] == "downgrade"
-        accent = styles.NEGATIVE if down else styles.SIGNAL_TEAL
-        bg = "#FEE2E2" if down else "#CCFBF1"
-        pill = _wc_pill(r["direction"].upper(), accent, bg)
-        body = (f'{cp._esc(r["field"])} {cp._esc(r["old"])} → '
-                f'{cp._esc(r["new"])} {pill}')
-        _wc_row(r["ticker"], r["name"], body, accent, f"wc_gr_{r['ticker']}_{i}")
+def _render_fv_tables(rows: list, meta: dict) -> None:
+    cuts = sorted([r for r in rows if r["direction"] == "cut"],
+                  key=lambda r: r["pct_change"])       # largest % cut first
+    raises = sorted([r for r in rows if r["direction"] == "raise"],
+                    key=lambda r: -r["pct_change"])    # largest % raise first
+    _fv_table(cuts, "Fair-value cuts", styles.NEGATIVE, _WC_NEG_TINT, meta)
+    _fv_table(raises, "Fair-value raises", styles.SIGNAL_TEAL, _WC_POS_TINT, meta)
 
 
-def _render_uncertainty_changes(rows: list) -> None:
-    for i, r in enumerate(rows):
-        rose = r["direction"] == "rose"
-        accent = styles.SIGNAL_AMBER if rose else styles.SIGNAL_TEAL
-        bg = "#FEF3C7" if rose else "#CCFBF1"
-        pill = _wc_pill(f'UNCERTAINTY {r["direction"].upper()}', accent, bg)
-        body = (f'Fair-value uncertainty {cp._esc(r["old"])} → '
-                f'{cp._esc(r["new"])} {pill}')
-        _wc_row(r["ticker"], r["name"], body, accent, f"wc_un_{r['ticker']}_{i}")
+def _fv_table(rows: list, title: str, accent: str, tint: str,
+              meta: dict) -> None:
+    if not rows:
+        st.markdown(f'<div class="muted-note">No {title.lower()}.</div>',
+                    unsafe_allow_html=True)
+        return
+    _wc_heading(f"{title} ({len(rows)})", accent)
+    recs = []
+    for r in rows:
+        b, c = _wc_bc(meta, r["ticker"])
+        recs.append({"Ticker": r["ticker"], "Name": str(r["name"])[:28],
+                     "Old FV": r["old"], "New FV": r["new"],
+                     "% change": r["pct_change"],
+                     "New upside-to-FV": r["new_upside"],
+                     "Bucket": b, "Crest": c})
+    df = pd.DataFrame(recs)
+    num = ["Old FV", "New FV", "% change", "New upside-to-FV"]
+    styler = (df.style
+              .format({"Old FV": cp.fmt_price, "New FV": cp.fmt_price,
+                       "% change": lambda v: cp.fmt_pct_frac(v),
+                       "New upside-to-FV": lambda v: cp.fmt_pct_frac(v)},
+                      na_rep=cp.DASH)
+              .set_properties(subset=["% change"], **{"background-color": tint})
+              .set_properties(subset=num, **{"text-align": "right"}))
+    st.dataframe(styler, hide_index=True, use_container_width=True)
+
+
+def _render_other_analyst_table(moats: list, grades: list, uncert: list,
+                                meta: dict) -> None:
+    """Lower-frequency moat / grade / uncertainty changes in one tinted table."""
+    recs = []
+    for r in moats:
+        recs.append({"Ticker": r["ticker"], "Name": str(r["name"])[:28],
+                     "Field": "Economic Moat",
+                     "Old → New": f'{r["old"]} → {r["new"]}',
+                     "Direction": r["direction"],
+                     "_neg": r["direction"] == "narrowed"})
+    for r in grades:
+        recs.append({"Ticker": r["ticker"], "Name": str(r["name"])[:28],
+                     "Field": r["field"],
+                     "Old → New": f'{r["old"]} → {r["new"]}',
+                     "Direction": r["direction"],
+                     "_neg": r["direction"] == "downgrade"})
+    for r in uncert:
+        recs.append({"Ticker": r["ticker"], "Name": str(r["name"])[:28],
+                     "Field": "FV Uncertainty",
+                     "Old → New": f'{r["old"]} → {r["new"]}',
+                     "Direction": f'uncertainty {r["direction"]}',
+                     "_neg": r["direction"] == "rose"})
+    if not recs:
+        return
+    # Negatives first, then by field for stable grouping.
+    recs.sort(key=lambda d: (not d["_neg"], d["Field"]))
+    _wc_heading(f"Other analyst changes ({len(recs)})", styles.NAVY)
+    df = pd.DataFrame(recs)
+    neg = df["_neg"].tolist()
+
+    def _tint_direction(_col):
+        return [f'background-color: {_WC_NEG_TINT}' if n
+                else f'background-color: {_WC_POS_TINT}' for n in neg]
+
+    styler = df.drop(columns=["_neg"]).style.apply(
+        _tint_direction, subset=["Direction"])
+    st.dataframe(styler, hide_index=True, use_container_width=True)
 
 
 def _render_fundamental_shifts(rows: list) -> None:
@@ -2836,7 +2889,8 @@ def view_what_changed() -> None:
                 'Fair-value cuts and downgrades are shown in warning colors.</div>',
                 unsafe_allow_html=True)
 
-    # ---- Section 1 — Analyst judgment (lead) ----------------------------
+    # ---- Section 1 — Analyst judgment (lead, compact tables) ------------
+    meta = res.get("meta", {})
     st.markdown('<div class="section-title">Analyst judgment</div>',
                 unsafe_allow_html=True)
     if not any((res["ratings"], res["fair_values"], res["moats"],
@@ -2844,20 +2898,14 @@ def view_what_changed() -> None:
         st.markdown('<div class="muted-note">No analyst-judgment changes between '
                     'these two exports.</div>', unsafe_allow_html=True)
     if res["ratings"]:
-        st.caption("Star-rating changes (downgrades first)")
-        _render_rating_changes(res["ratings"])
+        st.caption("Star-rating changes — downgrades lead; biggest move first.")
+        _render_rating_tables(res["ratings"], meta)
     if res["fair_values"]:
-        st.caption("Fair-value revisions (cuts first)")
-        _render_fv_changes(res["fair_values"])
-    if res["moats"]:
-        st.caption("Economic-moat changes (narrowing first)")
-        _render_moat_changes(res["moats"])
-    if res["grades"]:
-        st.caption("Letter-grade changes (downgrades first)")
-        _render_grade_changes(res["grades"])
-    if res["uncertainty"]:
-        st.caption("Fair-value uncertainty changes (rises first)")
-        _render_uncertainty_changes(res["uncertainty"])
+        st.caption("Fair-value revisions — cuts lead; new upside-to-FV is the "
+                   "analyst-side gap to price (separate from price moving).")
+        _render_fv_tables(res["fair_values"], meta)
+    _render_other_analyst_table(res["moats"], res["grades"],
+                                res["uncertainty"], meta)
 
     # ---- Section 2 — Fundamental shifts ---------------------------------
     st.markdown('<div class="section-title">Fundamental shifts</div>',

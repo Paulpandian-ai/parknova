@@ -114,7 +114,18 @@ def test_empty_state_no_crash():
     assert "no dated archive yet to compare against" in blob
 
 
-def test_populated_render_leads_with_analyst_judgment():
+def _df_blob(at) -> str:
+    """Concatenated cell text across all rendered dataframes (lowercased)."""
+    out = []
+    for d in at.dataframe:
+        try:
+            out.append(d.value.astype(str).to_string())
+        except Exception:
+            pass
+    return " ".join(out).lower()
+
+
+def test_populated_render_leads_with_compact_tables():
     at = AppTest.from_function(_populated_script, default_timeout=60)
     at.run()
     _raise_if_exc(at, "Populated What Changed")
@@ -122,17 +133,24 @@ def test_populated_render_leads_with_analyst_judgment():
     # Header states archive date -> current working file.
     assert "2026-06-02" in blob
     assert "comparing archive" in blob and "current working file" in blob
-    # Analyst-judgment section + the planted changes.
+    # Analyst-judgment section rendered as split, counted tables.
     assert "analyst judgment" in blob
-    assert "downgrade" in blob and "fv cut" in blob and "narrowed" in blob
+    assert "rating downgrades (1)" in blob       # split by direction + count
+    assert "fair-value cuts (1)" in blob
+    assert "other analyst changes (1)" in blob   # moat narrowing lives here
+    # Empty direction collapsed to a one-liner, not a big empty table.
+    assert "no rating upgrades." in blob and "no fair-value raises." in blob
     assert "fundamental shifts" in blob
     assert "universe changes" in blob
-    # Added/dropped surfaced.
     assert "added (1)" in blob and "dropped (1)" in blob
-    # Honest, factual framing; no advice language.
     assert "not advice" in blob
     for phrase in _FORBIDDEN:
         assert phrase not in blob, f"forbidden phrase: {phrase!r}"
+
+    # Table content present: tickers searchable + moat narrowing in a cell.
+    dblob = _df_blob(at)
+    assert "aaa" in dblob          # the changed ticker is visible in tables
+    assert "narrowed" in dblob     # direction shown in the combined table
 
 
 def test_no_changes_state_is_honest_not_error():
