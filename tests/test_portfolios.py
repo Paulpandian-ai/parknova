@@ -230,6 +230,79 @@ class TestSummaryCompare:
         # Nothing crashes; totals are numeric.
         assert isinstance(s["total_pnl"], float)
 
+    def test_missing_price_pnl_is_zero(self):
+        """With no live price, open position MV = cost; P&L = $0 (not distorted)."""
+        pf.create_portfolio("P1")
+        pf.open_position("p1", "MU", "BUY", 100, 100.0, thesis_at_entry=_entry())
+        rec = pf.read_portfolio("p1")
+        s = pf.portfolio_summary(rec, {})  # no prices
+        assert s["total_pnl"] == pytest.approx(0.0)
+        assert s["total_value"] == pytest.approx(pf.DEFAULT_CASH)
+
+    # --- Worked example from the spec ---------------------------------------
+    def test_worked_example_at_entry(self):
+        """100k start. BUY 100 BABA @130.82 then BUY 100 BTBT @1.98.
+        At entry (prices unchanged) total value = 100k, P&L = $0.
+        cash + positions must reconcile; cash is NOT 100k untouched."""
+        pf.create_portfolio("WE", cash_start=100_000.0)
+        pf.open_position("we", "BABA", "BUY", 100, 130.82, thesis_at_entry=_entry())
+        pf.open_position("we", "BTBT", "BUY", 100,   1.98, thesis_at_entry=_entry())
+        rec = pf.read_portfolio("we")
+        s = pf.portfolio_summary(rec, {"BABA": 130.82, "BTBT": 1.98})
+
+        assert s["cash_remaining"] == pytest.approx(86_720.0,   rel=1e-4)
+        assert s["invested_cost"]  == pytest.approx(13_280.0,   rel=1e-4)
+        assert s["positions_market_value"] == pytest.approx(13_280.0, rel=1e-4)
+        assert s["total_value"]    == pytest.approx(100_000.0,  rel=1e-4)
+        assert s["total_pnl"]      == pytest.approx(0.0,        abs=0.01)
+        # The total is cash + holdings, NOT just untouched starting cash.
+        assert s["cash_remaining"] < 100_000.0
+
+    def test_worked_example_price_move(self):
+        """Same setup. BABA rises 130.82 → 140. Total value should be 100,918."""
+        pf.create_portfolio("WE", cash_start=100_000.0)
+        pf.open_position("we", "BABA", "BUY", 100, 130.82, thesis_at_entry=_entry())
+        pf.open_position("we", "BTBT", "BUY", 100,   1.98, thesis_at_entry=_entry())
+        rec = pf.read_portfolio("we")
+        # BABA up to 140, BTBT unchanged.
+        s = pf.portfolio_summary(rec, {"BABA": 140.0, "BTBT": 1.98})
+
+        baba_mv = 100 * 140.0      # 14,000
+        btbt_mv = 100 * 1.98       # 198
+        expected_mv   = baba_mv + btbt_mv          # 14,198
+        expected_cash = 100_000.0 - 13_280.0       # 86,720
+        expected_total = expected_cash + expected_mv  # 100,918
+        expected_pnl   = 100 * (140.0 - 130.82)   # 918
+
+        assert s["positions_market_value"] == pytest.approx(expected_mv,    rel=1e-4)
+        assert s["cash_remaining"]         == pytest.approx(expected_cash,  rel=1e-4)
+        assert s["total_value"]            == pytest.approx(expected_total, rel=1e-4)
+        assert s["total_pnl"]              == pytest.approx(expected_pnl,   rel=1e-3)
+
+    def test_closed_position_credits_cash(self):
+        """Close a position: proceeds credited to cash; realized P&L included."""
+        pf.create_portfolio("P1", cash_start=100_000.0)
+        r = pf.open_position("p1", "MU", "BUY", 100, 100.0, thesis_at_entry=_entry())
+        pid = r["positions"][0]["id"]
+        pf.close_position("p1", pid, exit_price=120.0)
+        rec = pf.read_portfolio("p1")
+        s = pf.portfolio_summary(rec, {})
+
+        assert s["cash_remaining"]  == pytest.approx(102_000.0)  # 100k - 10k + 12k
+        assert s["invested_cost"]   == pytest.approx(0.0)         # nothing open
+        assert s["total_value"]     == pytest.approx(102_000.0)
+        assert s["total_pnl"]       == pytest.approx(2_000.0)
+        assert s["win_rate"]        == pytest.approx(1.0)
+
+    def test_over_allocated_flag(self):
+        """Paper portfolio: allow but flag when cost exceeds starting cash."""
+        pf.create_portfolio("P1", cash_start=1_000.0)
+        pf.open_position("p1", "MU", "BUY", 100, 100.0, thesis_at_entry=_entry())
+        rec = pf.read_portfolio("p1")
+        s = pf.portfolio_summary(rec, {"MU": 100.0})
+        assert s["over_allocated"] is True
+        assert s["cash_remaining"] < 0
+
     def test_compare_two_portfolios(self):
         pf.create_portfolio("Value")
         pf.create_portfolio("Momentum")

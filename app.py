@@ -2336,31 +2336,36 @@ def view_portfolios(full: pd.DataFrame, perf_full: pd.DataFrame,
     prices = _portfolio_prices(tickers)
     summary = pfl.portfolio_summary(record, prices)
 
-    # --- Header strip ----------------------------------------------------
+    # --- Header strip (cash + holdings composition) ----------------------
     if record.get("strategy_note"):
         st.caption(cp._esc(record["strategy_note"]))
-    h = st.columns(5)
+    h = st.columns(6)
     with h[0]:
-        cp.stat_card("Total value", cp.fmt_price(summary["total_value"]))
+        cp.stat_card("Total value", cp.fmt_price(summary["total_value"]),
+                     "cash + positions")
     with h[1]:
         cp.stat_card("Total P&L", cp.fmt_price(summary["total_pnl"]),
-                     cp.fmt_pct_frac(summary["total_pct"])
-                     if summary["total_pct"] is not None else "",
+                     cp.fmt_pct_frac(summary["total_pnl_pct"])
+                     if summary["total_pnl_pct"] is not None else "",
                      sign=summary["total_pnl"])
     with h[2]:
-        cp.stat_card("Open", str(summary["open_n"]))
+        cp.stat_card("Cash remaining", cp.fmt_price(summary["cash_remaining"]),
+                     "over-allocated" if summary["over_allocated"] else "")
     with h[3]:
+        cp.stat_card("Invested", cp.fmt_price(summary["invested_cost"]),
+                     f'{summary["open_n"]} open position'
+                     f'{"s" if summary["open_n"] != 1 else ""}')
+    with h[4]:
+        cp.stat_card("Open", str(summary["open_n"]))
+    with h[5]:
         cp.stat_card("Closed", str(summary["closed_n"]),
                      f'win rate {cp.fmt_pct_frac(summary["win_rate"], signed=False)}'
                      if summary["win_rate"] is not None else "")
-    with h[4]:
-        cp.stat_card("Top exposure",
-                     pfl.top_exposure(summary, "Crest") or cp.DASH)
 
     if not prices and tickers:
-        st.caption("Live prices unavailable (no API key) — P&L shows once a "
-                   "price source is configured. Closed positions still settle "
-                   "on their recorded exit price.")
+        st.caption("Live prices unavailable (no API key) — open positions show "
+                   "at cost, so P&L is $0 until a price source is configured. "
+                   "Closed positions settle on their recorded exit price.")
 
     tab_pos, tab_ver, tab_cmp = st.tabs(
         ["Positions", "Versions", "Compare"])
