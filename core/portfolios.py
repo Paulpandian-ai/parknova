@@ -318,17 +318,36 @@ def thesis_held(entry_evidence: Dict[str, Any],
 
 def portfolio_summary(record: Dict[str, Any],
                       prices: Dict[str, Optional[float]]) -> Dict[str, Any]:
-    """Portfolio-level roll-up. ``prices`` maps ticker -> current price.
+    """Portfolio-level roll-up using correct cash + holdings accounting.
 
-    Returns total value, total P&L ($ and %), open/closed counts, exposure by
-    crest/side/bucket, win rate on closed positions, conviction-weighted return,
-    and an equal-weight (same-tickers) benchmark return.
+    Cash accounting:
+      cash_remaining = cash_start
+                       − Σ(open cost bases)   [debited at BUY]
+                       − Σ(closed cost bases)  [debited at BUY]
+                       + Σ(closed exit proceeds) [credited at close]
+
+    Total Value = cash_remaining + Σ(open position market values)
+    Total P&L   = Total Value − cash_start
+
+    When a live price is unavailable for an open position the position MV falls
+    back to its cost basis, so the position contributes $0 P&L rather than
+    distorting totals. ``prices`` maps ticker -> current price (None = missing).
+
+    Exposed fields:
+      cash_remaining, invested_cost, positions_market_value,
+      total_value, total_pnl, total_pnl_pct  (+ total_pct alias for compat),
+      over_allocated (bool — cash_remaining < 0, paper-only warning),
+      open_n, closed_n, win_rate, conviction_weighted_return,
+      benchmark_equal_weight, cost_basis (alias for invested_cost), exposure.
     """
     positions = record.get("positions", [])
     cash_start = _num(record.get("cash_start")) or 0.0
-    total_cost = 0.0
-    total_value = 0.0
-    total_pnl = 0.0
+
+    open_cost = 0.0        # Σ cost bases of open positions (cash currently invested)
+    closed_cost = 0.0      # Σ cost bases of closed positions (already debited)
+    closed_proceeds = 0.0  # Σ exit proceeds of closed positions (credited at close)
+    positions_mv = 0.0     # Σ market values of open positions at current prices
+
     open_n = closed_n = 0
     wins = 0
     rets: List[float] = []
@@ -338,22 +357,27 @@ def portfolio_summary(record: Dict[str, Any],
     for pos in positions:
         price = prices.get(pos.get("ticker"))
         pnl = position_pnl(pos, price)
+        shares = _num(pos.get("shares")) or 0.0
+        entry = _num(pos.get("entry_price")) or 0.0
+        cost = shares * entry
+
         if pos.get("status") == "closed":
             closed_n += 1
+            closed_cost += cost
+            exit_p = _num(pos.get("exit_price")) or 0.0
+            closed_proceeds += shares * exit_p
             if pnl["return_pct"] is not None:
                 rets.append(pnl["return_pct"])
                 if pnl["dollar_pnl"] is not None and pnl["dollar_pnl"] > 0:
                     wins += 1
-                total_pnl += pnl["dollar_pnl"] or 0.0
         else:
             open_n += 1
-            if pnl["dollar_pnl"] is not None:
-                total_pnl += pnl["dollar_pnl"]
-            if pnl["market_value"] is not None:
-                total_value += pnl["market_value"]
+            open_cost += cost
+            # Fall back to cost basis when no live price: P&L contribution = $0.
+            mv = pnl["market_value"] if pnl["market_value"] is not None else cost
+            positions_mv += mv
             if pnl["return_pct"] is not None:
                 rets.append(pnl["return_pct"])
-        total_cost += pnl["cost_basis"] or 0.0
 
         # Conviction-weighted return (open + closed).
         conv = _num((pos.get("thesis_at_entry") or {}).get("conviction"))
@@ -361,27 +385,43 @@ def portfolio_summary(record: Dict[str, Any],
             conv_num += conv * pnl["return_pct"]
             conv_den += conv
 
-        # Exposure from the frozen entry evidence.
+        # Exposure from the frozen entry evidence (open: MV or cost; closed: proceeds).
         ev = (pos.get("thesis_at_entry") or {}).get("evidence", {})
         posn = ev.get("position", {})
-        mv = pnl["market_value"] or pnl["cost_basis"] or 0.0
+        exp_val = pnl["market_value"] or cost
         for dim, val in (("Crest", posn.get("crest")),
                          ("Side", posn.get("side")),
                          ("Primary Bucket", posn.get("primary_bucket"))):
             if val:
-                exposure[dim][val] = exposure[dim].get(val, 0.0) + mv
+                exposure[dim][val] = exposure[dim].get(val, 0.0) + exp_val
 
-    total_pct = (total_pnl / total_cost) if total_cost else None
+    # Core accounting identities.
+    cash_remaining = cash_start - open_cost - closed_cost + closed_proceeds
+    total_value = cash_remaining + positions_mv
+    total_pnl = total_value - cash_start
+    total_pnl_pct = (total_pnl / cash_start) if cash_start else None
+
     win_rate = (wins / closed_n) if closed_n else None
     conv_wtd = (conv_num / conv_den) if conv_den else None
     benchmark = (sum(rets) / len(rets)) if rets else None
+
     return {
-        "total_value": total_value + cash_start - total_cost
-        if cash_start else total_value,
-        "total_pnl": total_pnl, "total_pct": total_pct,
+        # Primary accounting fields.
+        "cash_remaining": cash_remaining,
+        "invested_cost": open_cost,
+        "positions_market_value": positions_mv,
+        "total_value": total_value,
+        "total_pnl": total_pnl,
+        "total_pnl_pct": total_pnl_pct,
+        "over_allocated": cash_remaining < 0,
+        # Back-compat aliases.
+        "total_pct": total_pnl_pct,
+        "cost_basis": open_cost,
+        # Activity + scoring.
         "open_n": open_n, "closed_n": closed_n,
-        "win_rate": win_rate, "conviction_weighted_return": conv_wtd,
-        "benchmark_equal_weight": benchmark, "cost_basis": total_cost,
+        "win_rate": win_rate,
+        "conviction_weighted_return": conv_wtd,
+        "benchmark_equal_weight": benchmark,
         "exposure": exposure,
     }
 
