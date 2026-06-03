@@ -14,6 +14,7 @@ from streamlit_option_menu import option_menu
 
 from core import factors as fc
 from core import performance as perf
+from core import signals as sig
 from core import store
 from core import synthesis as synth
 from core import thesis as thx
@@ -1745,10 +1746,235 @@ def _thesis_rollup(full: pd.DataFrame) -> None:
 
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# View: Signals
+# ---------------------------------------------------------------------------
+_DISCLAIMER = (
+    "Conditions flagged from current data for your review. "
+    "Not investment advice or predictions."
+)
+
+
+def _get_crest_wide(full: pd.DataFrame):
+    """Fetch the crest index and return the wide Early/Mid/Late frame (or empty)."""
+    from core import crest_index as ci
+
+    if not (service.has_api_key() or service.has_finnhub()):
+        return pd.DataFrame()
+    bar = st.progress(0.0, text="Loading crest index for signal computation…")
+    res = service.get_crest_indices(
+        full, force=False,
+        progress=lambda f, t: bar.progress(f, text=f"History… {t}"))
+    bar.empty()
+    records = res.get("records") or []
+    if not records:
+        return pd.DataFrame()
+    idx = pd.DataFrame(records)
+    idx["date"] = pd.to_datetime(idx["date"])
+    return ci.pivot_levels(idx, "crest")
+
+
+def _render_signal_1(rot: dict) -> None:
+    """Rotation inflection advisory with marked spread chart and key numbers."""
+    regime = rot["regime"]
+    is_inflection = regime in ("inflection_late", "inflection_early")
+
+    if is_inflection:
+        direction = "toward Late-crest" if regime == "inflection_late" else "toward Early-crest"
+        st.markdown(
+            f'<div class="news-item" style="border-color:{styles.SIGNAL_AMBER}; '
+            f'background:#FEFCE8;">'
+            f'<b>Rotation inflection — {direction}</b> (both conditions met)</div>',
+            unsafe_allow_html=True)
+    else:
+        regime_label = {
+            "early_leading": "Early-crest leading",
+            "late_leading": "Late-crest leading",
+            "neutral": "Regime unclear",
+        }.get(regime, regime)
+        st.markdown(
+            f'<div class="news-item" style="border-color:{styles.BORDER};">'
+            f'<b>Current regime: {regime_label}</b></div>',
+            unsafe_allow_html=True)
+
+    st.markdown(
+        f'<div class="muted-note" style="margin:6px 0 10px 0;">'
+        f'{cp._esc(rot["advisory"])}</div>',
+        unsafe_allow_html=True)
+
+    # Key numbers row
+    kc = st.columns(4)
+    def _fmts(v):
+        return f"{v:+.3f}/day" if v is not None else cp.DASH
+    def _fmtp(v):
+        return cp.fmt_pct_frac(v) if v is not None else cp.DASH
+
+    with kc[0]:
+        cp.stat_card("Spread (E−L)",
+                     f"{rot['spread_current']:.1f} pts" if rot["spread_current"] is not None else cp.DASH)
+    with kc[1]:
+        cp.stat_card("Slope (recent)", _fmts(rot["slope_recent"]),
+                     f"{sig.SLOPE_RECENT_DAYS}-day window")
+    with kc[2]:
+        cp.stat_card("Early 1M (median)", _fmtp(rot["early_1m"]))
+    with kc[3]:
+        cp.stat_card("Late 1M (median)", _fmtp(rot["late_1m"]))
+
+    # Spread chart with inflection marker
+    cp.spread_with_inflection_chart(
+        rot["spread_series"],
+        inflection_date=rot["inflection_date"],
+        title="Early − Late spread (full history)")
+
+
+def _render_stretch_warnings(warnings: list) -> None:
+    if not warnings:
+        st.markdown(
+            '<div class="muted-note">No stretch conditions detected in the '
+            'current universe.</div>', unsafe_allow_html=True)
+        return
+    for w in warnings[:15]:
+        n_conds = w["conditions"]
+        cond_label = f"{n_conds} condition{'s' if n_conds != 1 else ''} stacked"
+        chip = (
+            f'<span style="font-size:0.75rem;font-weight:600;padding:2px 8px;'
+            f'border-radius:4px;background:#FEF3C7;color:{styles.SIGNAL_AMBER};">'
+            f'{cond_label}</span>'
+        )
+        crest_chip = cp.crest_chip(w["crest"]) if w["crest"] else ""
+        st.markdown(
+            f'<div class="news-item" style="border-color:{styles.SIGNAL_AMBER};">'
+            f'<b>{cp._esc(w["ticker"])}</b> {cp._esc(w["name"])[:48]} '
+            f'{crest_chip} {chip}</div>',
+            unsafe_allow_html=True)
+        for reason in w["reasons"]:
+            st.markdown(
+                f'<div class="muted-note" style="margin:1px 0 0 8px;">'
+                f'&bull; {cp._esc(reason)}</div>',
+                unsafe_allow_html=True)
+        if w.get("ma_note") and not any("MA" in r for r in w["reasons"]):
+            st.markdown(
+                f'<div class="muted-note" style="margin:1px 0 0 8px;'
+                f'font-style:italic;">&bull; {cp._esc(w["ma_note"])}</div>',
+                unsafe_allow_html=True)
+
+
+def _render_opportunity_hints(hints: list, had_prior: bool) -> None:
+    if not had_prior:
+        st.markdown(
+            '<div class="muted-note" style="font-style:italic;">Fair-value '
+            'crossing signals require a prior reading (first run). Revisit '
+            'after the app has run at least twice.</div>',
+            unsafe_allow_html=True)
+    if not hints:
+        st.markdown(
+            '<div class="muted-note">No opportunity conditions detected in the '
+            'current universe.</div>', unsafe_allow_html=True)
+        return
+    type_labels = {
+        "fv_crossing": "FV crossing",
+        "fundamental_divergence": "Fundamental divergence",
+        "late_crest_leader": "Late-crest leader",
+        "other": "Signal",
+    }
+    for h in hints[:15]:
+        label = type_labels.get(h["hint_type"], "Signal")
+        chip = (
+            f'<span style="font-size:0.75rem;font-weight:600;padding:2px 8px;'
+            f'border-radius:4px;background:#CCFBF1;color:{styles.SIGNAL_TEAL};">'
+            f'{label}</span>'
+        )
+        crest_chip = cp.crest_chip(h["crest"]) if h["crest"] else ""
+        st.markdown(
+            f'<div class="news-item" style="border-color:{styles.SIGNAL_TEAL};">'
+            f'<b>{cp._esc(h["ticker"])}</b> {cp._esc(h["name"])[:48]} '
+            f'{crest_chip} {chip}</div>',
+            unsafe_allow_html=True)
+        for reason in h["reasons"]:
+            st.markdown(
+                f'<div class="muted-note" style="margin:1px 0 0 8px;">'
+                f'&bull; {cp._esc(reason)}</div>',
+                unsafe_allow_html=True)
+
+
+def view_signals(full: pd.DataFrame, perf_full: pd.DataFrame,
+                 scores: pd.DataFrame) -> None:
+    st.markdown('<div class="view-title">Signals</div>', unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="muted-note" style="margin-bottom:12px;">'
+        f'{_DISCLAIMER}</div>',
+        unsafe_allow_html=True)
+
+    # ---- Signal 1: crest rotation ----------------------------------------
+    st.markdown('<div class="section-title">Rotation signal — Early vs Late-crest'
+                '</div>', unsafe_allow_html=True)
+    if not (service.has_api_key() or service.has_finnhub()):
+        st.info("Set FMP_API_KEY or FINNHUB_API_KEY to enable the rotation signal "
+                "(needs crest index history).")
+        rot = sig.rotation_inflection(pd.DataFrame(), perf_full)
+    else:
+        wide_full = _get_crest_wide(full)
+        rot = sig.rotation_inflection(wide_full, perf_full)
+    _render_signal_1(rot)
+
+    # ---- Signal 2 + 3 (first pass without MA, then enrich top hits) ------
+    stretch_no_ma = sig.stretch_warnings(full, perf_full, histories=None)
+
+    # Fetch histories for the top flagged names only (at most 12 API calls, cached).
+    histories: dict = {}
+    if service.has_api_key() or service.has_finnhub():
+        top_tickers = [w["ticker"] for w in stretch_no_ma[:12]]
+        for t in top_tickers:
+            h = service.get_history_result(t)
+            s = h.get("series")
+            if s is not None and not s.empty:
+                histories[t] = s
+
+    stretch = sig.stretch_warnings(full, perf_full, histories=histories)
+    hints, had_prior = sig.opportunity_hints(
+        full, perf_full, scores, rot["regime"])
+
+    # Persist current FV readings for next-session crossing detection.
+    sig.save_prior_fv(full)
+
+    # ---- Summary strip ---------------------------------------------------
+    n_rot_adv = 1 if rot["regime"] in ("inflection_late", "inflection_early") else 0
+    st.markdown(
+        f'<div class="muted-note" style="margin:10px 0;">'
+        f'<b>{n_rot_adv}</b> rotation advisor{"y" if n_rot_adv == 1 else "ies"} &nbsp;·&nbsp; '
+        f'<b>{len(stretch)}</b> stretch warning{"" if len(stretch) == 1 else "s"} &nbsp;·&nbsp; '
+        f'<b>{len(hints)}</b> opportunity hint{"" if len(hints) == 1 else "s"}'
+        f'</div>',
+        unsafe_allow_html=True)
+
+    # ---- Two-column layout: warnings | hints -----------------------------
+    st.write("")
+    col_warn, col_opp = st.columns(2)
+    with col_warn:
+        st.markdown(
+            f'<div class="section-title" style="color:{styles.SIGNAL_AMBER};">'
+            f'Stretch warnings</div>',
+            unsafe_allow_html=True)
+        st.caption(
+            "Names at notable extremes — mean-reversion risk elevated. "
+            "Not a sell call; review whether your conviction still holds.")
+        _render_stretch_warnings(stretch)
+    with col_opp:
+        st.markdown(
+            f'<div class="section-title" style="color:{styles.SIGNAL_TEAL};">'
+            f'Opportunity hints</div>',
+            unsafe_allow_html=True)
+        st.caption(
+            "Conditions a value or timing investor might find worth reviewing. "
+            "Not a buy recommendation.")
+        _render_opportunity_hints(hints, had_prior)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 NAV_ITEMS = ["Performance", "Fundamentals & Factors", "Screener", "Buckets",
-             "Capex Cycle", "News & Filings", "Stock Detail", "Thesis"]
+             "Capex Cycle", "Signals", "News & Filings", "Stock Detail", "Thesis"]
 
 
 def main():
@@ -1783,7 +2009,7 @@ def main():
     # Single-ticker views (Stock Detail, Thesis, News & Filings) skip it and
     # call service.get_history_result for only the one selected ticker.
     UNIVERSE_VIEWS = {"Performance", "Fundamentals & Factors", "Screener",
-                      "Buckets", "Capex Cycle"}
+                      "Buckets", "Capex Cycle", "Signals"}
 
     full = full.copy()
     if selected in UNIVERSE_VIEWS:
@@ -1830,6 +2056,8 @@ def main():
         view_buckets(full, perf_full, scores)
     elif selected == "Capex Cycle":
         view_capex_cycle(full, perf_full, scores)
+    elif selected == "Signals":
+        view_signals(full, perf_full, scores)
     elif selected == "News & Filings":
         view_news(full)
     elif selected == "Stock Detail":

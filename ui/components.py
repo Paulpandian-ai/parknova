@@ -438,6 +438,39 @@ def spread_line_chart(spread: pd.Series, title: str = ""):
     st.plotly_chart(fig, width="stretch")
 
 
+def spread_with_inflection_chart(
+    spread: pd.Series,
+    inflection_date=None,
+    title: str = "Early − Late spread",
+) -> None:
+    """Spread line with optional vertical marker at the inflection date."""
+    if spread is None or spread.dropna().empty:
+        st.info("Spread unavailable (need both Early and Late layers in this window).")
+        return
+    s = spread.dropna()
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=s.index, y=s.values, mode="lines",
+        line=dict(color=styles.PRIMARY, width=2), fill="tozeroy",
+        fillcolor="rgba(37,99,235,0.08)",
+        hovertemplate="%{x|%b %d, %Y}<br>spread %{y:.1f} pts<extra></extra>",
+        name=s.name or "spread"))
+    fig.add_hline(y=0, line_dash="dot", line_color=styles.MUTED)
+    if inflection_date is not None:
+        fig.add_vline(
+            x=pd.to_datetime(inflection_date).timestamp() * 1000,
+            line_dash="dash", line_color=styles.SIGNAL_AMBER, line_width=2,
+            annotation_text="inflection", annotation_position="top right",
+            annotation_font_color=styles.SIGNAL_AMBER)
+    fig.update_layout(
+        template="plotly_white", height=280, title=title,
+        margin=dict(l=10, r=10, t=30, b=10),
+        xaxis=dict(showgrid=False),
+        yaxis=dict(gridcolor=styles.BORDER, title="Early − Late (index pts)"),
+        hovermode="x unified")
+    st.plotly_chart(fig, width="stretch")
+
+
 def constituent_count_chart(counts: pd.DataFrame, color_map: dict):
     """Thin area lines showing how many names back each group over time."""
     if counts is None or counts.empty:

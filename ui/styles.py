@@ -42,6 +42,8 @@ CREST_COLORS = {"Early": "#0D9488", "Mid": "#64748B", "Late": "#CA8A04"}
 SIDE_COLORS = {"Supplier": "#2563EB", "Demand": "#7C3AED",
                "Hyperscaler": "#1E3A8A", "Unknown": "#94A3B8"}
 TRAP_AMBER = "#CA8A04"
+SIGNAL_AMBER = "#CA8A04"   # stretch / warning signals (same as trap amber)
+SIGNAL_TEAL = "#0D9488"    # opportunity hints (same as Early-crest teal)
 
 _CSS = f"""
 <style>
