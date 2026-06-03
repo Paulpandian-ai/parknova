@@ -12,6 +12,7 @@ import streamlit as st
 from dotenv import load_dotenv
 from streamlit_option_menu import option_menu
 
+from core import divergence as dv
 from core import factors as fc
 from core import performance as perf
 from core import portfolios as pfl
@@ -227,6 +228,13 @@ def _live_interval():
     return _INTERVAL_SECS.get(st.session_state.get("live_interval", "15s"), 15)
 
 
+def _goto_detail(ticker: str, view: str = "Stock Detail") -> None:
+    """Set the shared ticker and request a nav jump to a single-ticker view."""
+    st.session_state["selected_ticker"] = ticker
+    st.session_state["_nav_goto"] = view
+    st.rerun()
+
+
 def _render_quote_inline(ticker: str, fallback_price=None) -> None:
     """Render the live price + today's-move chip + source/timestamp line."""
     import datetime as _dt
@@ -408,6 +416,9 @@ def view_performance(full: pd.DataFrame, perf_full: pd.DataFrame):
         else:
             cp.stat_card(f"Worst ({sel})", cp.DASH)
 
+    # Top movers by today's move (cached universe quotes — see _render_movers).
+    _render_movers(df)
+
     st.write("")
     t_table, t_mom, t_heat = st.tabs(["Returns table", "Momentum rank",
                                       "Heatmap"])
@@ -424,6 +435,92 @@ def view_performance(full: pd.DataFrame, perf_full: pd.DataFrame):
         else:
             mat = perf.group_heatmap(df, "Sector")
         cp.heatmap(mat, perf.ALL_WINDOWS, pct_fraction=True)
+
+
+# ---------------------------------------------------------------------------
+# Top movers — ranked on the cached universe quote tick (no 226-call burst)
+# ---------------------------------------------------------------------------
+def _movers_market_mode(ticker: str) -> str:
+    """Honest live/last-close label from one (cached) get_live_quote call.
+
+    'today's move' for the ranking comes from the universe frame's Today column —
+    the last cached quote tick per ticker — so ranking never fires 226 fresh
+    calls. We read a single reference quote (the top mover, usually already polled
+    by the table overlay, so cached) only to label whether the market is open.
+    """
+    try:
+        q = service.get_live_quote(ticker)
+    except Exception:
+        return ""
+    return q.get("mode") or ""
+
+
+def _mover_row(rec: pd.Series, positive: bool, key: str) -> None:
+    """One compact mover row: [ticker button] name + chips · Today% · price."""
+    color = styles.SIGNAL_TEAL if positive else styles.NEGATIVE
+    c_btn, c_body = st.columns([1, 5])
+    with c_btn:
+        if st.button(rec["Ticker"], key=key, use_container_width=True):
+            _goto_detail(rec["Ticker"])
+    with c_body:
+        today = rec.get("Today")
+        chips = (f'{cp.bucket_chip(rec.get("Primary Bucket"))} '
+                 f'{cp.side_chip(rec.get("Side"))} {cp.crest_chip(rec.get("Crest"))}')
+        st.markdown(
+            f'<div style="line-height:1.2;">'
+            f'<span style="font-weight:600;color:{color};">'
+            f'{cp.fmt_pct_frac(today)}</span> &nbsp; '
+            f'{cp.fmt_price(rec.get("Last Price"))} &nbsp; '
+            f'<span class="muted-note">{cp._esc(str(rec.get("Name") or ""))[:34]}'
+            f'</span><br>{chips}</div>',
+            unsafe_allow_html=True)
+
+
+def _render_movers(df: pd.DataFrame, n: int = 10) -> None:
+    """Top-N gainers and losers by today's move, side by side, click-through.
+
+    Ranks on the frame's Today column (the cached quote tick); refreshed on the
+    same Refresh / interval control that rebuilds the universe frame — not a
+    separate per-second poll, to stay rate-limit safe.
+    """
+    if "Today" not in df.columns:
+        return
+    ranked = df[df["Today"].notna()].copy()
+    n_missing = int(df["Today"].isna().sum())
+    if ranked.empty:
+        st.markdown('<div class="muted-note">No live quotes available to rank '
+                    'today\'s movers.</div>', unsafe_allow_html=True)
+        return
+    ranked = ranked.sort_values("Today", ascending=False)
+    gainers = ranked.head(n)
+    losers = ranked.tail(n).sort_values("Today", ascending=True)
+
+    mode = _movers_market_mode(gainers.iloc[0]["Ticker"]) if not gainers.empty else ""
+    if mode == "live":
+        tag = "live — today's intraday move"
+    elif mode == "last close":
+        tag = "last close — last completed session's move (markets closed)"
+    else:
+        tag = "last cached quote"
+    note = (f" · {n_missing} name(s) excluded (no quote)" if n_missing else "")
+
+    st.markdown('<div class="section-title">Top movers</div>',
+                unsafe_allow_html=True)
+    st.markdown(f'<div class="muted-note">Ranked by today\'s move · {tag}{note}'
+                f'</div>', unsafe_allow_html=True)
+    col_g, col_l = st.columns(2)
+    with col_g:
+        st.markdown(f'<div class="muted-note" style="font-weight:600;'
+                    f'color:{styles.SIGNAL_TEAL};">Top {len(gainers)} gainers'
+                    f'</div>', unsafe_allow_html=True)
+        for i, (_, rec) in enumerate(gainers.iterrows()):
+            _mover_row(rec, True, key=f"mvg_{rec['Ticker']}_{i}")
+    with col_l:
+        st.markdown(f'<div class="muted-note" style="font-weight:600;'
+                    f'color:{styles.NEGATIVE};">Top {len(losers)} losers</div>',
+                    unsafe_allow_html=True)
+        for i, (_, rec) in enumerate(losers.iterrows()):
+            _mover_row(rec, False, key=f"mvl_{rec['Ticker']}_{i}")
 
 
 # Live-quote overlay is scoped to the top-N sorted rows so the Performance
@@ -2068,6 +2165,84 @@ def view_signals(full: pd.DataFrame, perf_full: pd.DataFrame,
             "Not a buy recommendation.")
         _render_opportunity_hints(hints, had_prior)
 
+    # ---- Price–fundamentals divergence -----------------------------------
+    st.divider()
+    groups = dv.price_fundamentals_divergence(
+        full, perf_full, scores, prior_fv=sig.load_prior_fv())
+    _render_divergence(groups)
+
+
+# ---------------------------------------------------------------------------
+# Price–fundamentals divergence section (Signals view)
+# ---------------------------------------------------------------------------
+_DIVERGENCE_FLAVORS = [
+    ("euphoria", "Price ahead of value", styles.SIGNAL_AMBER, "#FEF3C7",
+     "Strong up move while trading at a premium to fair value — the market is "
+     "bidding it past intrinsic value."),
+    ("opportunity", "Price falling away from value", styles.SIGNAL_TEAL, "#CCFBF1",
+     "Recent down move while cheap vs fair value — price dropping as the value "
+     "case strengthens."),
+    ("dislocation", "Momentum vs fundamentals", styles.NAVY, "#E0E7FF",
+     "A short-term move whose direction conflicts with the factor percentiles."),
+]
+
+
+def _render_divergence_row(r: dict, accent: str, chip_bg: str,
+                           flavor: str, i: int) -> None:
+    dir_chip = ""
+    if r.get("direction"):
+        dir_chip = (f'<span style="font-size:0.72rem;font-weight:600;'
+                    f'padding:1px 7px;border-radius:4px;background:{chip_bg};'
+                    f'color:{accent};">{r["direction"].upper()}</span>')
+    crest_chip = cp.crest_chip(r["crest"]) if r.get("crest") else ""
+    c_btn, c_body = st.columns([1, 6])
+    with c_btn:
+        if st.button(r["ticker"], key=f"dv_{flavor}_{r['ticker']}_{i}",
+                     use_container_width=True):
+            _goto_detail(r["ticker"])
+    with c_body:
+        st.markdown(
+            f'<div class="news-item" style="border-color:{accent};margin:0;">'
+            f'<b>{cp._esc(r["ticker"])}</b> {cp._esc(r["name"])[:42]} '
+            f'{crest_chip} {dir_chip}'
+            f'<div class="muted-note" style="margin-top:2px;">'
+            f'{cp._esc(r["reason"])}</div></div>',
+            unsafe_allow_html=True)
+
+
+def _render_divergence(groups: dict) -> None:
+    st.markdown('<div class="view-title" style="font-size:1.05rem;">'
+                'Price–fundamentals divergence</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="muted-note" style="margin-bottom:6px;">'
+        'Where price is moving in a way current fundamentals or fair value do '
+        'not obviously justify. <b>Not an earnings-surprise detector</b> — there '
+        'is no analyst-estimate feed; no beats/misses are implied. Conditions for '
+        'review, not advice or predictions.</div>', unsafe_allow_html=True)
+
+    counts = dv.divergence_counts(groups)
+    st.markdown(
+        f'<div class="muted-note" style="margin-bottom:8px;">'
+        f'<b>{counts["euphoria"]}</b> price-ahead-of-value &nbsp;·&nbsp; '
+        f'<b>{counts["opportunity"]}</b> price-away-from-value &nbsp;·&nbsp; '
+        f'<b>{counts["dislocation"]}</b> momentum–factor dislocation</div>',
+        unsafe_allow_html=True)
+
+    cols = st.columns(3)
+    for col, (flavor, title, accent, chip_bg, blurb) in zip(
+            cols, _DIVERGENCE_FLAVORS):
+        with col:
+            st.markdown(f'<div class="section-title" style="color:{accent};">'
+                        f'{title}</div>', unsafe_allow_html=True)
+            st.caption(blurb)
+            rows = groups.get(flavor, [])
+            if not rows:
+                st.markdown('<div class="muted-note">None in the current '
+                            'universe.</div>', unsafe_allow_html=True)
+                continue
+            for i, r in enumerate(rows[:8]):
+                _render_divergence_row(r, accent, chip_bg, flavor, i)
+
 
 # ---------------------------------------------------------------------------
 # View: Portfolios (paper — your own decisions, no execution, no advice)
@@ -2516,9 +2691,18 @@ def main():
         st.stop()
 
     # Horizontal text-only nav (no emoji), enterprise styling, active underline.
+    # A row's "open" button elsewhere can request a jump via _nav_goto; honor it
+    # once by passing manual_select so the menu lands on the target view.
+    manual = None
+    if "_nav_goto" in st.session_state:
+        try:
+            manual = NAV_ITEMS.index(st.session_state.pop("_nav_goto"))
+        except ValueError:
+            manual = None
     selected = option_menu(
         menu_title=None, options=NAV_ITEMS, orientation="horizontal",
-        default_index=0, key="nav", styles=styles.nav_styles())
+        default_index=0, key="nav", manual_select=manual,
+        styles=styles.nav_styles())
 
     # Universe-wide views need the full performance sweep (226 tickers).
     # Single-ticker views (Stock Detail, Thesis, News & Filings) skip it and
