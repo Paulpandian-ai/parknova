@@ -137,6 +137,19 @@ def value_trap_chip(reason: str = "") -> str:
             f'Value-trap watch</span>')
 
 
+_HELD_CHIP = {
+    "improved": (styles.SIGNAL_TEAL, "Thesis improved"),
+    "held": (styles.MUTED, "Thesis held"),
+    "weakened": (styles.SIGNAL_AMBER, "Thesis weakened"),
+}
+
+
+def thesis_held_chip(status: str) -> str:
+    """Entry-vs-now chip: improved=teal, held=slate, weakened=amber."""
+    color, label = _HELD_CHIP.get(status, (styles.MUTED, "—"))
+    return (f'<span class="chip" style="background:{color};">{label}</span>')
+
+
 # Form-group -> (color, label) for SEC filing badges.
 _FORM_BADGE = {
     "financials": ("#2563EB", "Financials"),

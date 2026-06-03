@@ -205,6 +205,26 @@ def read_json(key: str) -> Optional[Any]:
         return None
 
 
+def delete_json(key: str) -> bool:
+    """Delete the raw-JSON object under ``key``. Best-effort; never raises."""
+    if _use_s3():
+        client = _s3_client()
+        if client is not None:
+            try:
+                client.delete_object(Bucket=_bucket(), Key=f"{_prefix()}/{key}")
+                return True
+            except Exception as exc:
+                logger.warning("S3 delete_json failed for %s (%s); local.", key, exc)
+    try:
+        path = _raw_local_path(key)
+        if os.path.exists(path):
+            os.remove(path)
+        return True
+    except OSError as exc:
+        logger.warning("Local delete_json failed for %s: %s", key, exc)
+        return False
+
+
 def list_keys(prefix: str) -> list:
     """List JSON keys under ``prefix`` (e.g. 'theses/'), relative to the root."""
     keys: list = []
