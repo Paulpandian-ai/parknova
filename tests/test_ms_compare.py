@@ -194,3 +194,53 @@ def test_no_advice_language_in_directions():
                     ("ratings", "fair_values", "moats", "grades") for r in res[grp]).lower()
     for word in ("buy", "sell", "target price", "recommend"):
         assert word not in blob
+
+
+# ---------------------------------------------------------------------------
+# Selector — latest archive vs current working file
+# ---------------------------------------------------------------------------
+def _touch(path: str) -> None:
+    with open(path, "w") as fh:
+        fh.write("x")
+
+
+def test_zero_archives_returns_none(tmp_path):
+    assert mc.latest_archive_and_working(root=str(tmp_path)) is None
+
+
+def test_latest_archive_vs_working_file(tmp_path, monkeypatch):
+    # Two archives with space/underscore stem variants; picks the max date.
+    _touch(str(tmp_path / "AI_Equities_Universe_Data from MorningStar_2026-05-01.xlsx"))
+    _touch(str(tmp_path / "AI_Equities_Universe_Data_from_MorningStar_2026-06-02.xlsx"))
+    monkeypatch.setattr(mc, "working_file_path",
+                        lambda: "/repo/AI_Equities_Universe_Data from MorningStar.xlsx")
+    sel = mc.latest_archive_and_working(root=str(tmp_path))
+    assert sel is not None
+    assert sel["old_date"] == "2026-06-02"               # max trailing date
+    assert sel["old_path"].endswith("2026-06-02.xlsx")
+    assert sel["new_date"] == "current working file"
+    assert sel["new_path"] == \
+        "/repo/AI_Equities_Universe_Data from MorningStar.xlsx"
+
+
+def test_space_and_underscore_variants_both_matched(tmp_path):
+    _touch(str(tmp_path / "AI_Equities_Universe_Data from MorningStar_2026-06-01.xlsx"))
+    _touch(str(tmp_path / "AI_Equities_Universe_Data_from_MorningStar_2026-06-03.xlsx"))
+    archives = mc.list_archives(root=str(tmp_path))
+    dates = [d for d, _ in archives]
+    assert dates == ["2026-06-01", "2026-06-03"]         # both seen, sorted
+
+
+def test_identical_snapshots_report_no_changes():
+    old = _base()
+    res = mc.compare_snapshots(old, old.copy(), "2026-06-02",
+                               "current working file")
+    assert mc.has_changes(res) is False
+    assert all(v == 0 for v in res["counts"].values())
+
+
+def test_changes_after_refresh_report_has_changes():
+    old, new = _base(), _base()
+    new.loc[new["Ticker"] == "AAA", "Morningstar Rating for Stocks"] = 2.0
+    res = mc.compare_snapshots(old, new, "2026-06-02", "current working file")
+    assert mc.has_changes(res) is True

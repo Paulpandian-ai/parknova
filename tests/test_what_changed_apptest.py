@@ -48,7 +48,7 @@ def _empty_script():
     sys.path.insert(0, "/home/user/parknova")
     import app
     from core import ms_compare as mcmp
-    mcmp.latest_two = lambda root=None: None
+    mcmp.latest_archive_and_working = lambda root=None: None
     mcmp.list_archives = lambda root=None: []
     app.styles.inject_css()
     app.view_what_changed()
@@ -62,10 +62,29 @@ def _populated_script():
     from tests.test_what_changed_apptest import _two_frames
 
     old, new = _two_frames()
-    res = mcmp.compare_snapshots(old, new, "2026-05-01", "2026-06-01")
-    mcmp.latest_two = lambda root=None: {
-        "old_date": "2026-05-01", "old_path": "/x.xlsx",
-        "new_date": "2026-06-01", "new_path": "/y.xlsx"}
+    res = mcmp.compare_snapshots(old, new, "2026-06-02", "current working file")
+    mcmp.latest_archive_and_working = lambda root=None: {
+        "old_date": "2026-06-02", "old_path": "/x.xlsx",
+        "new_date": "current working file", "new_path": "/y.xlsx"}
+    app._load_comparison = lambda *a, **k: res
+    app.styles.inject_css()
+    app.view_what_changed()
+
+
+def _no_changes_script():
+    import sys
+    sys.path.insert(0, "/home/user/parknova")
+    import app
+    from core import ms_compare as mcmp
+    from tests.test_what_changed_apptest import _two_frames
+
+    old, _ = _two_frames()
+    # Identical snapshots: archive == working file -> no changes.
+    res = mcmp.compare_snapshots(old, old.copy(), "2026-06-02",
+                                 "current working file")
+    mcmp.latest_archive_and_working = lambda root=None: {
+        "old_date": "2026-06-02", "old_path": "/x.xlsx",
+        "new_date": "current working file", "new_path": "/y.xlsx"}
     app._load_comparison = lambda *a, **k: res
     app.styles.inject_css()
     app.view_what_changed()
@@ -92,7 +111,7 @@ def test_empty_state_no_crash():
     _raise_if_exc(at, "Empty What Changed")
     blob = " ".join(m.value for m in at.markdown).lower()
     blob += " ".join(a.value for a in at.info).lower()
-    assert "at least two dated morningstar archives" in blob
+    assert "no dated archive yet to compare against" in blob
 
 
 def test_populated_render_leads_with_analyst_judgment():
@@ -100,9 +119,9 @@ def test_populated_render_leads_with_analyst_judgment():
     at.run()
     _raise_if_exc(at, "Populated What Changed")
     blob = _blob(at)
-    # Both dates in the header.
-    assert "2026-05-01" in blob and "2026-06-01" in blob
-    assert "comparing morningstar exports" in blob
+    # Header states archive date -> current working file.
+    assert "2026-06-02" in blob
+    assert "comparing archive" in blob and "current working file" in blob
     # Analyst-judgment section + the planted changes.
     assert "analyst judgment" in blob
     assert "downgrade" in blob and "fv cut" in blob and "narrowed" in blob
@@ -114,3 +133,14 @@ def test_populated_render_leads_with_analyst_judgment():
     assert "not advice" in blob
     for phrase in _FORBIDDEN:
         assert phrase not in blob, f"forbidden phrase: {phrase!r}"
+
+
+def test_no_changes_state_is_honest_not_error():
+    at = AppTest.from_function(_no_changes_script, default_timeout=60)
+    at.run()
+    _raise_if_exc(at, "No-changes What Changed")
+    blob = _blob(at)
+    blob += " ".join(a.value for a in at.success).lower()
+    assert "comparing archive" in blob
+    assert "no changes detected" in blob
+    assert "your next data refresh" in blob
