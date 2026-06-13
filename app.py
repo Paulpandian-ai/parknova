@@ -12,6 +12,7 @@ import streamlit as st
 from dotenv import load_dotenv
 from streamlit_option_menu import option_menu
 
+from core import barometer as bm
 from core import divergence as dv
 from core import factors as fc
 from core import ms_compare as mcmp
@@ -2094,6 +2095,231 @@ def _render_opportunity_hints(hints: list, had_prior: bool) -> None:
                 unsafe_allow_html=True)
 
 
+# ---------------------------------------------------------------------------
+# View: Barometer (where return concentrates; cell drill-down; alpha hunt)
+# ---------------------------------------------------------------------------
+_BAROMETER_NOTE = (
+    "Outperformance is trailing. Cross-reference upside-to-FV and the value-trap "
+    "flag — a cell that ran hard may be priced-in, not repeatable. Factual map, "
+    "not advice.")
+
+
+def _barometer_frame(full: pd.DataFrame, perf_full: pd.DataFrame,
+                     scores: pd.DataFrame) -> pd.DataFrame:
+    """Assemble one merged universe frame for the barometer (no recompute).
+
+    Returns/factors/timing come from the already-built cached frames; this only
+    joins the columns the pure barometer logic reads.
+    """
+    cols = ["Ticker", "Name", "Stock Style Box", "Primary Bucket", "Crest",
+            "Side", "upside_fv", "valuation_tier", "value_trap",
+            "Price/Earnings (Forward)"]
+    base = full[[c for c in cols if c in full.columns]].copy()
+    win_cols = [w for w in perf.ALL_WINDOWS if w in perf_full.columns]
+    if win_cols:
+        base = base.merge(perf_full[["Ticker"] + win_cols], on="Ticker",
+                          how="left")
+    fac = [c for c in bm.FACTOR_PCT_COLS if c in scores.columns]
+    if fac:
+        base = base.merge(scores[["Ticker"] + fac], on="Ticker", how="left")
+    return base
+
+
+def _barometer_cell_html(cell: dict, window: str, color_by: str,
+                         hot_lo: float, hot_hi: float) -> str:
+    """One heatmap cell: median metric + count, graded; thin cells flagged."""
+    n = cell["n"]
+    if n == 0:
+        return ('<div style="border:1px solid #E2E8F0;border-radius:8px;'
+                'padding:10px;min-height:74px;background:#FFF;">'
+                '<div class="muted-note">n=0</div></div>')
+    if color_by == "upside_fv":
+        metric = cell["median_upside_fv"]
+    else:
+        metric = cell["median_return"]
+    bg = cp.return_bg(metric) or "background-color:#FFF;"
+    thin = cell["thin"]
+    thin_badge = ('<span style="font-size:0.64rem;font-weight:700;color:'
+                  f'{styles.SIGNAL_AMBER};"> · low-confidence</span>'
+                  if thin else "")
+    ret_s = cp.fmt_pct_frac(cell["median_return"])
+    up_s = (cp.fmt_pct_frac(cell["median_upside_fv"])
+            if cell["median_upside_fv"] is not None else cp.DASH)
+    pe_s = (cp.fmt_mult(cell["median_fwd_pe"])
+            if cell["median_fwd_pe"] is not None else cp.DASH)
+    # Thin cells get a dashed amber border so low-confidence is obvious.
+    border = (f"2px dashed {styles.SIGNAL_AMBER}" if thin else "1px solid #E2E8F0")
+    return (
+        f'<div style="border:{border};border-radius:8px;padding:10px;'
+        f'min-height:74px;{bg}">'
+        f'<div style="font-weight:700;">{ret_s} '
+        f'<span class="muted-note">n={n}{thin_badge}</span></div>'
+        f'<div class="muted-note" style="margin-top:3px;">'
+        f'upside-to-FV {up_s} · fwd P/E {pe_s}</div></div>')
+
+
+def _render_barometer_grid(df: pd.DataFrame, grouping: str, window: str,
+                           color_by: str) -> list:
+    """Render the heatmap for the grouping; return the cell stats list."""
+    cells = bm.cell_stats(df, grouping, window)
+    by_label = {c["label"]: c for c in cells}
+
+    if grouping == bm.GROUP_STYLE:
+        rows, colaxis = bm.SIZES, bm.STYLES
+    elif grouping == bm.GROUP_CREST:
+        rows = [c for c in bm.CREST_ORDER]
+        colaxis = sorted({c["col"] for c in cells if c["col"]},
+                         key=lambda s: (bm.SIDE_ORDER + [s]).index(s))
+    else:
+        rows, colaxis = None, None
+
+    if rows is not None:
+        # Column header row.
+        head = st.columns([1] + [2] * len(colaxis))
+        head[0].markdown("&nbsp;", unsafe_allow_html=True)
+        for h, col in zip(head[1:], colaxis):
+            h.markdown(f'<div class="muted-note" style="font-weight:700;'
+                       f'text-align:center;">{cp._esc(col)}</div>',
+                       unsafe_allow_html=True)
+        for r in rows:
+            line = st.columns([1] + [2] * len(colaxis))
+            line[0].markdown(f'<div class="muted-note" style="font-weight:700;'
+                             f'padding-top:24px;">{cp._esc(r)}</div>',
+                             unsafe_allow_html=True)
+            for cellcol, c in zip(line[1:], colaxis):
+                label = f"{r} {c}" if grouping == bm.GROUP_STYLE else f"{r} / {c}"
+                cell = by_label.get(label, {"n": 0, "thin": False,
+                                            "median_return": None,
+                                            "median_upside_fv": None,
+                                            "median_fwd_pe": None})
+                cell.setdefault("label", label)
+                cellcol.markdown(
+                    _barometer_cell_html(cell, window, color_by, 0, 0),
+                    unsafe_allow_html=True)
+    else:
+        # Bucket: 1-D, render in rows of 3, ranked by median return.
+        ordered = sorted([c for c in cells if c["n"] > 0],
+                         key=lambda c: (c["median_return"] is None,
+                                        -(c["median_return"] or 0)))
+        for i in range(0, len(ordered), 3):
+            line = st.columns(3)
+            for col, c in zip(line, ordered[i:i + 3]):
+                with col:
+                    st.markdown(f'<div class="muted-note" style="font-weight:700;'
+                                f'">{cp._esc(c["label"])}</div>',
+                                unsafe_allow_html=True)
+                    st.markdown(_barometer_cell_html(c, window, color_by, 0, 0),
+                                unsafe_allow_html=True)
+
+    # Unclassified note (style box only).
+    unc = by_label.get(bm.UNCLASSIFIED)
+    if unc and unc["n"] > 0:
+        st.markdown(f'<div class="muted-note" style="margin-top:6px;">'
+                    f'Unclassified style box: {unc["n"]} name(s) — shown '
+                    f'separately, not forced into a cell.</div>',
+                    unsafe_allow_html=True)
+    return cells
+
+
+def _render_barometer_drill(df: pd.DataFrame, grouping: str, cells: list,
+                            window: str) -> None:
+    options = [c["label"] for c in cells if c["n"] > 0
+               and not c["is_unclassified"]]
+    if not options:
+        return
+    st.markdown('<div class="section-title">Cell drill-down</div>',
+                unsafe_allow_html=True)
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        cell_label = st.selectbox("Cell", options, key="barometer_cell")
+    with c2:
+        below = st.checkbox("Below fair value only (upside-to-FV > 0)",
+                            value=False, key="barometer_below_fv")
+    st.caption(_BAROMETER_NOTE)
+    table = bm.cell_constituents(df, grouping, cell_label, window,
+                                 below_fv_only=below, sort_by_upside=True)
+    if table.empty:
+        st.markdown('<div class="muted-note">No names match.</div>',
+                    unsafe_allow_html=True)
+        return
+    _render_barometer_table(table, window)
+
+
+def _render_barometer_table(table: pd.DataFrame, window: str) -> None:
+    show = table.copy()
+    if "value_trap" in show.columns:
+        show["value_trap"] = show["value_trap"].map(
+            lambda v: "trap" if v else "")
+    fmt = {}
+    if window in show.columns:
+        fmt[window] = lambda v: cp.fmt_pct_frac(v)
+    if "upside_fv" in show.columns:
+        fmt["upside_fv"] = lambda v: cp.fmt_pct_frac(v)
+    for fcol in bm.FACTOR_PCT_COLS:
+        if fcol in show.columns:
+            fmt[fcol] = cp.fmt_score
+    num = [c for c in ([window, "upside_fv"] + bm.FACTOR_PCT_COLS)
+           if c in show.columns]
+    styler = (show.style.format(fmt, na_rep=cp.DASH)
+              .set_properties(subset=num, **{"text-align": "right"}))
+    if window in show.columns:
+        styler = styler.map(cp.return_bg, subset=[window])
+    if "upside_fv" in show.columns:
+        styler = styler.map(cp.return_bg, subset=["upside_fv"])
+    st.dataframe(styler, hide_index=True, use_container_width=True)
+
+
+def _render_alpha_hunt(df: pd.DataFrame, grouping: str, window: str) -> None:
+    st.markdown(f'<div class="section-title" style="color:{styles.SIGNAL_TEAL};">'
+                f'Alpha hunt</div>', unsafe_allow_html=True)
+    st.caption("Names in an outperforming cell that still trade below Morningstar "
+               "fair value and are NOT flagged value traps — outperformance the "
+               "fundamentals still support. Ranked by upside-to-FV. Not advice.")
+    res = bm.alpha_hunt(df, grouping, window)
+    if res.empty:
+        st.markdown('<div class="muted-note">No below-fair-value, non-trap names '
+                    'in the outperforming cells for this window.</div>',
+                    unsafe_allow_html=True)
+        return
+    st.markdown(f'<div class="muted-note"><b>{len(res)}</b> candidate(s).</div>',
+                unsafe_allow_html=True)
+    _render_barometer_table(res, window)
+
+
+def view_barometer(full: pd.DataFrame, perf_full: pd.DataFrame,
+                   scores: pd.DataFrame) -> None:
+    st.markdown('<div class="view-title">Barometer — where return '
+                'concentrates</div>', unsafe_allow_html=True)
+    df = _barometer_frame(full, perf_full, scores)
+
+    c1, c2, c3 = st.columns([2, 2, 2])
+    with c1:
+        grouping = st.radio("Group by", bm.GROUPINGS, horizontal=True,
+                            key="barometer_group")
+    with c2:
+        win_opts = [w for w in perf.ALL_WINDOWS if w in df.columns]
+        default = win_opts.index("1Y") if "1Y" in win_opts else 0
+        window = st.selectbox("Return window", win_opts, index=default,
+                              key="barometer_window")
+    with c3:
+        color_by = st.radio("Color by", ["return", "upside_fv"], horizontal=True,
+                            format_func=lambda x: "Return (hot)" if x == "return"
+                            else "Upside-to-FV (cheap)", key="barometer_colorby")
+
+    st.markdown(f'<div class="muted-note">Median {window} return per cell with '
+                f'the name count behind it. Thin cells (n&lt;{bm.THIN_CELL_N}) are '
+                f'dashed-amber as low-confidence.</div>', unsafe_allow_html=True)
+    cells = _render_barometer_grid(df, grouping, window, color_by)
+
+    st.divider()
+    _render_barometer_drill(df, grouping, cells, window)
+
+    st.divider()
+    with st.expander("Alpha hunt — below-FV outperformers (non-trap)",
+                     expanded=False):
+        _render_alpha_hunt(df, grouping, window)
+
+
 def view_signals(full: pd.DataFrame, perf_full: pd.DataFrame,
                  scores: pd.DataFrame) -> None:
     st.markdown('<div class="view-title">Signals</div>', unsafe_allow_html=True)
@@ -2924,7 +3150,7 @@ def view_what_changed() -> None:
 # Main
 # ---------------------------------------------------------------------------
 NAV_ITEMS = ["Performance", "Fundamentals & Factors", "Screener", "Buckets",
-             "Capex Cycle", "Signals", "Portfolios", "What Changed",
+             "Capex Cycle", "Barometer", "Signals", "Portfolios", "What Changed",
              "News & Filings", "Stock Detail", "Thesis"]
 
 
@@ -2969,7 +3195,8 @@ def main():
     # Single-ticker views (Stock Detail, Thesis, News & Filings) skip it and
     # call service.get_history_result for only the one selected ticker.
     UNIVERSE_VIEWS = {"Performance", "Fundamentals & Factors", "Screener",
-                      "Buckets", "Capex Cycle", "Signals", "Portfolios"}
+                      "Buckets", "Capex Cycle", "Barometer", "Signals",
+                      "Portfolios"}
 
     full = full.copy()
     if selected in UNIVERSE_VIEWS:
@@ -3010,6 +3237,8 @@ def main():
         view_buckets(full, perf_full, scores)
     elif selected == "Capex Cycle":
         view_capex_cycle(full, perf_full, scores)
+    elif selected == "Barometer":
+        view_barometer(full, perf_full, scores)
     elif selected == "Signals":
         view_signals(full, perf_full, scores)
     elif selected == "Portfolios":
