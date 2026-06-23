@@ -44,12 +44,16 @@ def _performance_script():
     sys.path.insert(0, "/home/user/parknova")
     import streamlit as st
     import app
+    from core import market_session as msx
     from tests.test_movers_divergence_apptest import _build_frames
 
-    # Deterministic quote: avoids network and gives the movers a 'last close' tag.
+    # Deterministic session + quote: pin to a closed market so the movers heading
+    # is stable regardless of when the test runs.
+    msx.market_session = lambda *a, **k: msx.CLOSED
     app.service.get_live_quote = lambda t: {
         "price": 100.0, "pct": 0.0, "source": "FMP", "mode": "last close",
-        "as_of": "2026-06-02", "error": None}
+        "as_of": "2026-06-02", "error": None, "session": msx.CLOSED,
+        "is_extended": False, "ext_price": None, "ext_pct": None}
     st.session_state["live_interval"] = "Off"  # no fragment polling in the test
 
     full, perf_full, scores = _build_frames()

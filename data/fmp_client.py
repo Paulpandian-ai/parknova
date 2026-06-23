@@ -57,6 +57,17 @@ def fmp_error_text(data: Any) -> Optional[str]:
     return None
 
 
+def _first_num(row: Dict[str, Any], fields: Tuple[str, ...]) -> Optional[float]:
+    """First field in ``fields`` present on ``row`` that parses to a float."""
+    for f in fields:
+        if f in row and row[f] is not None:
+            try:
+                return float(row[f])
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
 class FMPError(RuntimeError):
     """Raised when the API key is missing."""
 
@@ -175,6 +186,46 @@ class FMPClient:
             ("FMP news/stock", f"{STABLE}/news/stock",
              {"symbols": ticker, "limit": 1}),
         ]
+
+    def extended_hours_targets(self, ticker: str
+                               ) -> List[Tuple[str, str, Dict[str, Any]]]:
+        """(name, url, params) for the pre/post-market endpoints to probe.
+
+        These are plan-gated on many tiers; the aftermarket-trade endpoint, when
+        available, carries an extended-hours print (price + epoch-ms timestamp).
+        Diagnostics probes both so the verbatim status/shape is visible.
+        """
+        return [
+            ("FMP aftermarket-trade", f"{STABLE}/aftermarket-trade",
+             {"symbol": ticker}),
+            ("FMP aftermarket-quote", f"{STABLE}/aftermarket-quote",
+             {"symbol": ticker}),
+        ]
+
+    def aftermarket_trade(self, ticker: str) -> Dict[str, Any]:
+        """Return ``{price, ts, raw, error}`` from the aftermarket-trade endpoint.
+
+        ``price`` is the extended-hours trade price and ``ts`` its timestamp
+        (epoch seconds, normalised from FMP's epoch-ms) when present. Returns
+        price/ts None with the FMP reason when the endpoint is plan-gated/empty —
+        the caller must NOT treat that as an extended-hours price.
+        """
+        data = self._get(f"{STABLE}/aftermarket-trade", {"symbol": ticker},
+                         return_errors=True)
+        err = fmp_error_text(data)
+        if err:
+            return {"price": None, "ts": None, "raw": data, "error": err}
+        row = data[0] if isinstance(data, list) and data else (
+            data if isinstance(data, dict) else None)
+        if not isinstance(row, dict):
+            return {"price": None, "ts": None, "raw": data,
+                    "error": "no aftermarket trade row"}
+        price = _first_num(row, ("price", "tradePrice", "lastPrice", "p"))
+        ts = _first_num(row, ("timestamp", "ts", "t", "date"))
+        if ts is not None and ts > 1e12:   # epoch ms -> seconds
+            ts = ts / 1000.0
+        return {"price": price, "ts": int(ts) if ts is not None else None,
+                "raw": row, "error": None}
 
     # ------------------------------------------------------------------
     # Daily history (one fetch per ticker; momentum windows sliced locally)
