@@ -194,18 +194,30 @@ def _extended_quote(ticker: str) -> Optional[dict]:
     returns a price AND timestamp; the % is vs the prior regular close (latest
     raw close from cached history). Plan-gated/empty -> None, so the caller falls
     back to the regular/last price and never mislabels a stale close.
+
+    Fail-safe: ANY error (missing method / network / parse / plan-gated) is
+    swallowed and treated as "no extended-hours data". This overlay must never
+    crash the core live-quote / returns path — it degrades to the regular quote.
     """
     try:
         client = get_client()
-    except FMPError:
+        fetch = getattr(client, "aftermarket_trade", None)
+        if not callable(fetch):
+            logger.debug("aftermarket_trade not available on FMP client; "
+                         "extended-hours disabled.")
+            return None
+        res = fetch(ticker) or {}
+        price, ts = res.get("price"), res.get("ts")
+        if price is None or ts is None:
+            return None
+        prior = get_history_result(ticker).get("raw_last")
+        return {"price": float(price), "ts": ts, "prior_close": prior,
+                "pct": msx.extended_change(price, prior),
+                "source": "FMP (aftermarket)"}
+    except Exception as exc:  # never propagate to the quote/returns path
+        logger.debug("extended-hours fetch failed for %s (%s); using regular.",
+                     ticker, exc)
         return None
-    res = client.aftermarket_trade(ticker)
-    price, ts = res.get("price"), res.get("ts")
-    if price is None or ts is None:
-        return None
-    prior = get_history_result(ticker).get("raw_last")
-    return {"price": float(price), "ts": ts, "prior_close": prior,
-            "pct": msx.extended_change(price, prior), "source": "FMP (aftermarket)"}
 
 
 @st.cache_data(ttl=QUOTE_TTL, show_spinner=False)
@@ -217,19 +229,26 @@ def get_live_quote(ticker: str) -> dict:
     the quote uses it (mode 'pre-market'/'after-hours', % vs prior regular close).
     Otherwise it falls back to the regular/last-close path below — a stale
     regular price is NEVER relabeled as pre/post-market. Cached at QUOTE_TTL.
+
+    The extended-hours branch is fully guarded: any failure there degrades to the
+    regular-session quote so the returns table always renders.
     """
     session = msx.market_session()
     if msx.is_extended_session(session):
-        ext = _extended_quote(ticker)
-        if ext is not None:
-            cls = msx.classify_extended(session, ext["price"], ext["ts"],
-                                        ext["prior_close"])
-            if cls["is_extended"]:
-                return {"price": ext["price"], "pct": cls["ext_pct"],
-                        "source": ext["source"], "mode": cls["mode"],
-                        "as_of": ext["ts"], "error": None, "session": session,
-                        "is_extended": True, "ext_price": ext["price"],
-                        "ext_pct": cls["ext_pct"]}
+        try:
+            ext = _extended_quote(ticker)
+            if ext is not None:
+                cls = msx.classify_extended(session, ext["price"], ext["ts"],
+                                            ext["prior_close"])
+                if cls["is_extended"]:
+                    return {"price": ext["price"], "pct": cls["ext_pct"],
+                            "source": ext["source"], "mode": cls["mode"],
+                            "as_of": ext["ts"], "error": None,
+                            "session": session, "is_extended": True,
+                            "ext_price": ext["price"], "ext_pct": cls["ext_pct"]}
+        except Exception as exc:  # extended overlay is best-effort only
+            logger.debug("extended-hours quote path failed for %s (%s); "
+                         "falling back to regular.", ticker, exc)
     base = _regular_quote(ticker)
     base.update({"session": session, "is_extended": False,
                  "ext_price": None, "ext_pct": None})
@@ -568,26 +587,44 @@ def extended_hours_probe(ticker: str = "NVDA") -> dict:
 
     # --- Finnhub: inspect the /quote payload for any extended-hours field ---
     if has_finnhub_key():
-        ef = get_finnhub_client().extended_hours_fields(ticker)
-        if ef["present"]:
-            detail = f"extended-hours field(s) present: {', '.join(ef['fields'])}"
-            available = True
-        else:
-            detail = ("regular-session only on this plan (no pre/post field in "
-                      "/quote)")
-            available = False
-        providers.append({"provider": "Finnhub", "available": available,
-                          "detail": detail, "status": ef.get("status"),
-                          "price": None, "ts": None})
+        try:
+            ef = get_finnhub_client().extended_hours_fields(ticker)
+            if ef["present"]:
+                detail = ("extended-hours field(s) present: "
+                          f"{', '.join(ef['fields'])}")
+                available = True
+            else:
+                detail = ("regular-session only on this plan (no pre/post field "
+                          "in /quote)")
+                available = False
+            providers.append({"provider": "Finnhub", "available": available,
+                              "detail": detail, "status": ef.get("status"),
+                              "price": None, "ts": None})
+        except Exception as exc:
+            providers.append({"provider": "Finnhub", "available": False,
+                              "detail": f"probe error: {exc}", "status": None,
+                              "price": None, "ts": None})
     else:
         providers.append({"provider": "Finnhub", "available": False,
                           "detail": "FINNHUB_API_KEY not set", "status": None,
                           "price": None, "ts": None})
 
     # --- FMP: probe the aftermarket endpoints + judge the trade response ---
+    # Fully guarded: a missing method / network / parse error reports NOT
+    # AVAILABLE rather than crashing the diagnostics panel.
     try:
         client = get_client()
-        for name, url, params in client.extended_hours_targets(ticker):
+        targets_fn = getattr(client, "extended_hours_targets", None)
+        trade_fn = getattr(client, "aftermarket_trade", None)
+        if not callable(targets_fn):
+            providers.append({"provider": "FMP aftermarket", "available": False,
+                              "detail": "extended-hours endpoints not implemented "
+                              "in this build", "status": None, "price": None,
+                              "ts": None})
+            targets = []
+        else:
+            targets = targets_fn(ticker)
+        for name, url, params in targets:
             p = client.probe(url, params)
             status = p.get("status")
             if p.get("error"):
@@ -597,8 +634,8 @@ def extended_hours_probe(ticker: str = "NVDA") -> dict:
                                   "price": None, "ts": None})
                 continue
             # For the trade endpoint, judge whether a real ext print came back.
-            if "trade" in name:
-                tr = client.aftermarket_trade(ticker)
+            if "trade" in name and callable(trade_fn):
+                tr = trade_fn(ticker) or {}
                 price, ts = tr.get("price"), tr.get("ts")
                 cls = msx.classify_extended(session, price, ts, prior_close)
                 if price is not None and ts is not None:
@@ -628,6 +665,10 @@ def extended_hours_probe(ticker: str = "NVDA") -> dict:
     except FMPError:
         providers.append({"provider": "FMP", "available": False,
                           "detail": "FMP_API_KEY not set", "status": None,
+                          "price": None, "ts": None})
+    except Exception as exc:  # any other failure -> honest NOT AVAILABLE
+        providers.append({"provider": "FMP aftermarket", "available": False,
+                          "detail": f"probe error: {exc}", "status": None,
                           "price": None, "ts": None})
 
     available = any(pr["available"] for pr in providers)

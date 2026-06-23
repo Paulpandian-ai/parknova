@@ -115,3 +115,83 @@ class TestExtendedHoursProbe:
                          session=msx.REGULAR)
         res = service.extended_hours_probe("XPRB3")
         assert res["available"] is False
+
+
+# ---------------------------------------------------------------------------
+# Regression: extended-hours failures must NEVER crash the quote/returns path
+# ---------------------------------------------------------------------------
+class _ClientNoAftermarket:
+    """A client missing the aftermarket method entirely (the original bug)."""
+    # no aftermarket_trade / extended_hours_targets attributes
+
+
+class _ClientRaisingAftermarket:
+    def aftermarket_trade(self, ticker):
+        raise RuntimeError("boom: network/parse/plan-gated")
+
+    def extended_hours_targets(self, ticker):
+        raise AttributeError("legacy build")
+
+
+def _force_extended_session(monkeypatch):
+    monkeypatch.setattr(msx, "market_session", lambda *a, **k: msx.AFTER)
+    monkeypatch.setattr(service, "_regular_quote", lambda t: {
+        "price": 100.0, "pct": 0.01, "source": "FMP", "mode": "last close",
+        "as_of": "2025-06-10", "error": None})
+    monkeypatch.setattr(service, "get_history_result",
+                        lambda t: {"raw_last": 100.0})
+
+
+class TestExtendedFailSafe:
+    def test_extended_quote_none_when_method_missing(self, monkeypatch):
+        monkeypatch.setattr(service, "get_client", lambda: _ClientNoAftermarket())
+        service._extended_quote.clear()
+        assert service._extended_quote("XMISS") is None   # no AttributeError
+
+    def test_extended_quote_none_when_method_raises(self, monkeypatch):
+        monkeypatch.setattr(service, "get_client",
+                            lambda: _ClientRaisingAftermarket())
+        service._extended_quote.clear()
+        assert service._extended_quote("XRAISE") is None  # swallowed
+
+    def test_live_quote_falls_back_when_method_missing(self, monkeypatch):
+        _force_extended_session(monkeypatch)
+        monkeypatch.setattr(service, "get_client", lambda: _ClientNoAftermarket())
+        service._extended_quote.clear()
+        service.get_live_quote.clear()
+        q = service.get_live_quote("XFB1")           # must not raise
+        assert q["is_extended"] is False
+        assert q["mode"] == "last close"
+        assert q["price"] == 100.0
+        assert q["session"] == msx.AFTER
+
+    def test_live_quote_falls_back_when_method_raises(self, monkeypatch):
+        _force_extended_session(monkeypatch)
+        monkeypatch.setattr(service, "get_client",
+                            lambda: _ClientRaisingAftermarket())
+        service._extended_quote.clear()
+        service.get_live_quote.clear()
+        q = service.get_live_quote("XFB2")           # must not raise
+        assert q["is_extended"] is False
+        assert q["mode"] == "last close"
+
+    def test_probe_reports_not_available_when_method_missing(self, monkeypatch):
+        monkeypatch.setattr(msx, "market_session", lambda *a, **k: msx.AFTER)
+        monkeypatch.setattr(service, "has_finnhub_key", lambda: False)
+        monkeypatch.setattr(service, "get_client", lambda: _ClientNoAftermarket())
+        monkeypatch.setattr(service, "get_history_result",
+                            lambda t: {"raw_last": 100.0})
+        res = service.extended_hours_probe("XPRBMISS")  # must not raise
+        assert res["available"] is False
+        assert "NOT AVAILABLE" in res["verdict"]
+
+    def test_probe_reports_not_available_when_method_raises(self, monkeypatch):
+        monkeypatch.setattr(msx, "market_session", lambda *a, **k: msx.AFTER)
+        monkeypatch.setattr(service, "has_finnhub_key", lambda: False)
+        monkeypatch.setattr(service, "get_client",
+                            lambda: _ClientRaisingAftermarket())
+        monkeypatch.setattr(service, "get_history_result",
+                            lambda t: {"raw_last": 100.0})
+        res = service.extended_hours_probe("XPRBRAISE")  # must not raise
+        assert res["available"] is False
+        assert "NOT AVAILABLE" in res["verdict"]
