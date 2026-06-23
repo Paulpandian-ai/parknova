@@ -15,6 +15,7 @@ from streamlit_option_menu import option_menu
 from core import barometer as bm
 from core import divergence as dv
 from core import factors as fc
+from core import market_session as msx
 from core import ms_compare as mcmp
 from core import performance as perf
 from core import portfolios as pfl
@@ -144,6 +145,17 @@ def settings_popover() -> None:
             if pb:
                 _render_price_basis(pb)
 
+            st.divider()
+            st.caption("Extended-hours probe — does your plan return a real "
+                       "pre/post-market price (vs the regular close)? Run during "
+                       "pre/after-hours for a definitive answer.")
+            if st.button("Probe extended-hours", width="stretch",
+                         key="run_ext_probe"):
+                st.session_state["_ext_probe"] = service.extended_hours_probe(test_t)
+            ep = st.session_state.get("_ext_probe")
+            if ep:
+                _render_ext_probe(ep)
+
         _render_storage_status()
 
         src = []
@@ -219,6 +231,29 @@ def _render_price_basis(pb: dict) -> None:
                     f'{cp._esc(pb["note"])}</div>', unsafe_allow_html=True)
 
 
+def _render_ext_probe(ep: dict) -> None:
+    """Render the extended-hours probe verdict + per-provider detail."""
+    avail = ep.get("available")
+    color = styles.POSITIVE if avail else styles.MUTED
+    st.markdown(
+        f'<div class="muted-note">Current ET session: '
+        f'<b>{cp._esc(ep.get("session_label"))}</b></div>',
+        unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="muted-note" style="color:{color};font-weight:600;'
+        f'margin:2px 0;">{cp._esc(ep.get("verdict"))}</div>',
+        unsafe_allow_html=True)
+    for pr in ep.get("providers", []):
+        ok = pr.get("available")
+        dot = (f'<span style="color:{styles.POSITIVE};">AVAILABLE</span>' if ok
+               else f'<span style="color:{styles.MUTED};">not available</span>')
+        status = f" (HTTP {pr['status']})" if pr.get("status") else ""
+        st.markdown(
+            f'<div class="muted-note" style="margin:1px 0;">'
+            f'<b>{cp._esc(pr.get("provider"))}</b>{status}: {dot} · '
+            f'{cp._esc(pr.get("detail"))}</div>', unsafe_allow_html=True)
+
+
 # ---------------------------------------------------------------------------
 # Live quote (near-real-time) — refreshes in place via st.fragment
 # ---------------------------------------------------------------------------
@@ -258,11 +293,21 @@ def _render_quote_inline(ticker: str, fallback_price=None) -> None:
         return
     cls = "" if pct is None else ("pos" if float(pct) >= 0 else "neg")
     move = cp.DASH if pct is None else cp.fmt_pct_frac(pct)  # pct is a fraction
-    # Honest "live" vs "last close" tag (Bug-1): markets closed -> EOD change.
-    if q.get("mode") == "live":
+    mode = q.get("mode")
+    # Honest session tag: extended-hours / live / last close. A regular or stale
+    # price is never labeled pre/post-market — mode comes from the quote source.
+    if q.get("is_extended") and mode in ("pre-market", "after-hours"):
+        ts = q.get("as_of")
+        try:
+            tstr = (_dt.datetime.fromtimestamp(float(ts)).strftime("%H:%M:%S")
+                    if ts is not None else "")
+        except (TypeError, ValueError, OSError):
+            tstr = ""
+        tag = f"{mode} · {source}{(' · ' + tstr) if tstr else ''} (vs prior close)"
+    elif mode == "live":
         now = _dt.datetime.now().strftime("%H:%M:%S")
         tag = f"live · {source} · updated {now}"
-    elif q.get("mode") == "last close":
+    elif mode == "last close":
         d = q.get("as_of")
         dstr = (pd.Timestamp(d).strftime("%b %d") if d is not None else "")
         tag = f"last close · {source}{(' · ' + dstr) if dstr else ''}"
@@ -442,19 +487,23 @@ def view_performance(full: pd.DataFrame, perf_full: pd.DataFrame):
 # ---------------------------------------------------------------------------
 # Top movers — ranked on the cached universe quote tick (no 226-call burst)
 # ---------------------------------------------------------------------------
-def _movers_market_mode(ticker: str) -> str:
-    """Honest live/last-close label from one (cached) get_live_quote call.
+def _movers_session_and_ext(top_ticker: str) -> tuple:
+    """(session, extended_available) for the movers heading.
 
-    'today's move' for the ranking comes from the universe frame's Today column —
-    the last cached quote tick per ticker — so ranking never fires 226 fresh
-    calls. We read a single reference quote (the top mover, usually already polled
-    by the table overlay, so cached) only to label whether the market is open.
+    Session comes from the ET clock (no network). Extended-hours availability is
+    read from ONE cached reference quote (the top mover) — its is_extended flag —
+    so we never burst 226 calls just to label the session. Ranking still uses the
+    frame's cached Today column (rate-safe).
     """
-    try:
-        q = service.get_live_quote(ticker)
-    except Exception:
-        return ""
-    return q.get("mode") or ""
+    session = msx.market_session()
+    ext_available = False
+    if msx.is_extended_session(session) and top_ticker:
+        try:
+            ext_available = bool(
+                service.get_live_quote(top_ticker).get("is_extended"))
+        except Exception:
+            ext_available = False
+    return session, ext_available
 
 
 def _mover_row(rec: pd.Series, positive: bool, key: str) -> None:
@@ -497,19 +546,15 @@ def _render_movers(df: pd.DataFrame, n: int = 10) -> None:
     gainers = ranked.head(n)
     losers = ranked.tail(n).sort_values("Today", ascending=True)
 
-    mode = _movers_market_mode(gainers.iloc[0]["Ticker"]) if not gainers.empty else ""
-    if mode == "live":
-        tag = "live — today's intraday move"
-    elif mode == "last close":
-        tag = "last close — last completed session's move (markets closed)"
-    else:
-        tag = "last cached quote"
+    top_ticker = gainers.iloc[0]["Ticker"] if not gainers.empty else ""
+    session, ext_available = _movers_session_and_ext(top_ticker)
+    suffix = msx.movers_session_suffix(session, ext_available)
     note = (f" · {n_missing} name(s) excluded (no quote)" if n_missing else "")
 
-    st.markdown('<div class="section-title">Top movers</div>',
+    st.markdown(f'<div class="section-title">Top movers — {suffix}</div>',
                 unsafe_allow_html=True)
-    st.markdown(f'<div class="muted-note">Ranked by today\'s move · {tag}{note}'
-                f'</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="muted-note">Ranked by the move from the cached '
+                f'quote tick{note}.</div>', unsafe_allow_html=True)
     col_g, col_l = st.columns(2)
     with col_g:
         st.markdown(f'<div class="muted-note" style="font-weight:600;'

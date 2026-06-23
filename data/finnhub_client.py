@@ -98,6 +98,25 @@ class FinnhubClient:
         return {"price": c, "change": d.get("d"), "pct": d.get("dp"),
                 "prev_close": d.get("pc"), "ts": d.get("t"), "error": None}
 
+    def extended_hours_fields(self, ticker: str) -> Dict[str, Any]:
+        """Report whether the /quote payload carries any extended-hours field.
+
+        Finnhub's free-tier /quote is regular-session only (c/d/dp/pc/t/h/l/o) —
+        no pre/post fields. This inspects the raw payload for any known
+        extended-hours key so the diagnostics verdict is honest about the plan:
+        ``{present, fields, status, error, raw_keys}``.
+        """
+        ext_keys = ("preMarketPrice", "postMarketPrice", "extendedHoursPrice",
+                    "preMarket", "postMarket", "extPrice")
+        r = self._get("quote", {"symbol": ticker})
+        if r["error"]:
+            return {"present": False, "fields": [], "status": r["status"],
+                    "error": r["error"], "raw_keys": []}
+        d = r["data"] or {}
+        found = [k for k in ext_keys if k in d and d.get(k) not in (None, 0)]
+        return {"present": bool(found), "fields": found, "status": r["status"],
+                "error": None, "raw_keys": sorted(d.keys())}
+
     # ------------------------------------------------------------------
     # Daily candles (history fallback for FMP)
     # ------------------------------------------------------------------

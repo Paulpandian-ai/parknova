@@ -16,6 +16,7 @@ import pandas as pd
 import streamlit as st
 
 from core import filing_cache
+from core import market_session as msx
 from data.edgar_client import EDGARClient
 from data.finnhub_client import FinnhubClient, has_finnhub_key
 from data.fmp_client import FMPClient, FMPError
@@ -186,15 +187,57 @@ def _eod_change(ticker: str) -> Optional[dict]:
 
 
 @st.cache_data(ttl=QUOTE_TTL, show_spinner=False)
-def get_live_quote(ticker: str) -> dict:
-    """Return ``{price, pct, source, mode, as_of, error}`` for one ticker.
+def _extended_quote(ticker: str) -> Optional[dict]:
+    """Real extended-hours print (FMP aftermarket-trade), or None when absent.
 
-    The single source of truth for a ticker's displayed price/Today across the
-    whole app (Stock Detail card AND the Performance table both call this), so
-    the two never disagree. Cached at QUOTE_TTL (~15s) so repeated calls within
-    a render — or back-to-back across views — return the identical quote object
-    without re-hitting Finnhub/FMP, and the fragment poll picks up fresh values
-    only after the TTL lapses (rate-limit safe).
+    Returns ``{price, ts, prior_close, pct, source}`` only when the endpoint
+    returns a price AND timestamp; the % is vs the prior regular close (latest
+    raw close from cached history). Plan-gated/empty -> None, so the caller falls
+    back to the regular/last price and never mislabels a stale close.
+    """
+    try:
+        client = get_client()
+    except FMPError:
+        return None
+    res = client.aftermarket_trade(ticker)
+    price, ts = res.get("price"), res.get("ts")
+    if price is None or ts is None:
+        return None
+    prior = get_history_result(ticker).get("raw_last")
+    return {"price": float(price), "ts": ts, "prior_close": prior,
+            "pct": msx.extended_change(price, prior), "source": "FMP (aftermarket)"}
+
+
+@st.cache_data(ttl=QUOTE_TTL, show_spinner=False)
+def get_live_quote(ticker: str) -> dict:
+    """Session-aware quote: ``{price, pct, source, mode, as_of, error, session,
+    is_extended, ext_price, ext_pct}``.
+
+    During pre/after-hours, if a provider returns a *real* extended-hours print,
+    the quote uses it (mode 'pre-market'/'after-hours', % vs prior regular close).
+    Otherwise it falls back to the regular/last-close path below — a stale
+    regular price is NEVER relabeled as pre/post-market. Cached at QUOTE_TTL.
+    """
+    session = msx.market_session()
+    if msx.is_extended_session(session):
+        ext = _extended_quote(ticker)
+        if ext is not None:
+            cls = msx.classify_extended(session, ext["price"], ext["ts"],
+                                        ext["prior_close"])
+            if cls["is_extended"]:
+                return {"price": ext["price"], "pct": cls["ext_pct"],
+                        "source": ext["source"], "mode": cls["mode"],
+                        "as_of": ext["ts"], "error": None, "session": session,
+                        "is_extended": True, "ext_price": ext["price"],
+                        "ext_pct": cls["ext_pct"]}
+    base = _regular_quote(ticker)
+    base.update({"session": session, "is_extended": False,
+                 "ext_price": None, "ext_pct": None})
+    return base
+
+
+def _regular_quote(ticker: str) -> dict:
+    """Regular-session / last-close quote (the pre-extended-hours behavior).
 
     "Today" precedence so the value is meaningful 24/7:
       1. live intraday — Finnhub dp that is non-null AND non-zero (market open);
@@ -407,6 +450,7 @@ def clear_live_caches() -> None:
     get_history_result.clear()
     get_quotes_batch.clear()
     get_live_quote.clear()
+    _extended_quote.clear()
     get_stock_news.clear()
     get_general_news.clear()
     get_institutional_holders.clear()
@@ -502,6 +546,102 @@ def run_diagnostics(ticker: str = "NVDA") -> List[dict]:
                      "error": "FINNHUB_API_KEY not set", "empty": False,
                      "kind": None, "keys": None, "sample": None})
     return rows
+
+
+def extended_hours_probe(ticker: str = "NVDA") -> dict:
+    """Probe each provider for a REAL pre/post-market price (vs the regular close).
+
+    Returns ``{session, session_label, prior_close, providers, available,
+    verdict}``. Each provider row: ``{provider, available, detail, status,
+    price, ts}``. ``available`` (top level) is True only if some provider
+    returned a distinct extended-hours price with a timestamp during a pre/after
+    session — never inferred from a regular close.
+    """
+    session = msx.market_session()
+    prior_close = None
+    try:
+        prior_close = get_history_result(ticker).get("raw_last")
+    except Exception:
+        prior_close = None
+
+    providers: List[dict] = []
+
+    # --- Finnhub: inspect the /quote payload for any extended-hours field ---
+    if has_finnhub_key():
+        ef = get_finnhub_client().extended_hours_fields(ticker)
+        if ef["present"]:
+            detail = f"extended-hours field(s) present: {', '.join(ef['fields'])}"
+            available = True
+        else:
+            detail = ("regular-session only on this plan (no pre/post field in "
+                      "/quote)")
+            available = False
+        providers.append({"provider": "Finnhub", "available": available,
+                          "detail": detail, "status": ef.get("status"),
+                          "price": None, "ts": None})
+    else:
+        providers.append({"provider": "Finnhub", "available": False,
+                          "detail": "FINNHUB_API_KEY not set", "status": None,
+                          "price": None, "ts": None})
+
+    # --- FMP: probe the aftermarket endpoints + judge the trade response ---
+    try:
+        client = get_client()
+        for name, url, params in client.extended_hours_targets(ticker):
+            p = client.probe(url, params)
+            status = p.get("status")
+            if p.get("error"):
+                detail = f"{name}: {p['error']}"
+                providers.append({"provider": name, "available": False,
+                                  "detail": detail, "status": status,
+                                  "price": None, "ts": None})
+                continue
+            # For the trade endpoint, judge whether a real ext print came back.
+            if "trade" in name:
+                tr = client.aftermarket_trade(ticker)
+                price, ts = tr.get("price"), tr.get("ts")
+                cls = msx.classify_extended(session, price, ts, prior_close)
+                if price is not None and ts is not None:
+                    distinct = (prior_close is None
+                                or abs(float(price) - float(prior_close)) > 1e-9)
+                    avail = bool(cls["is_extended"])
+                    detail = (f"{name}: price {price} ts {ts}"
+                              + (" (extended-hours print)" if avail
+                                 else " (matches regular close — not extended"
+                                      if not distinct else
+                                      " (price+ts present but not a pre/after "
+                                      "session)"))
+                    providers.append({"provider": name, "available": avail,
+                                      "detail": detail, "status": status,
+                                      "price": price, "ts": ts})
+                else:
+                    providers.append({"provider": name, "available": False,
+                                      "detail": f"{name}: no extended-hours "
+                                      "price/timestamp returned",
+                                      "status": status, "price": None,
+                                      "ts": None})
+            else:
+                providers.append({"provider": name, "available": False,
+                                  "detail": f"{name}: status {status}"
+                                  f" (keys={p.get('keys')})",
+                                  "status": status, "price": None, "ts": None})
+    except FMPError:
+        providers.append({"provider": "FMP", "available": False,
+                          "detail": "FMP_API_KEY not set", "status": None,
+                          "price": None, "ts": None})
+
+    available = any(pr["available"] for pr in providers)
+    if available:
+        src = next(pr for pr in providers if pr["available"])
+        verdict = (f"Extended-hours: AVAILABLE via {src['provider']} "
+                   f"(price {src['price']}, ts {src['ts']}) — "
+                   f"current session {msx.session_label(session)}.")
+    else:
+        verdict = ("Extended-hours: NOT AVAILABLE on current Finnhub/FMP plans — "
+                   "movers will show regular/last-session only.")
+    return {"session": session, "session_label": msx.session_label(session),
+            "prior_close": prior_close, "providers": providers,
+            "available": available, "verdict": verdict}
 
 
 def price_basis_report(ticker: str) -> dict:
