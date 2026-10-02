@@ -8,11 +8,13 @@ UI falls back to the deterministic summary.
 
 from __future__ import annotations
 
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
 from core.config import get_secret
+from data import prism_trace
 
 API_URL = "https://api.anthropic.com/v1/messages"
 TIMEOUT = 60
@@ -35,16 +37,25 @@ def has_anthropic_key() -> bool:
     return bool(get_secret("ANTHROPIC_API_KEY"))
 
 
-def _call_messages(prompt: str, model: str, max_tokens: int
+def _call_messages(prompt: str, model: str, max_tokens: int,
+                   session_id: Optional[str] = None
                    ) -> Tuple[Optional[str], Optional[Dict[str, int]]]:
     """POST one user message to the Messages API.
 
     Returns ``(text, usage)`` where usage is ``{input_tokens, output_tokens}``
-    when the API provides it. On any failure returns ``(None, None)``.
+    when the API provides it. On any failure returns ``(None, None)``. Each call
+    is traced to PRISM (no-op unless ``PRISMTRACE_API_KEY`` is set).
     """
     key = get_secret("ANTHROPIC_API_KEY")
     if not key:
         return None, None
+    t0 = time.monotonic()
+
+    def _trace(text: Optional[str], error: Optional[str] = None) -> None:
+        prism_trace.emit(prompt, text, model=model,
+                         latency_ms=int((time.monotonic() - t0) * 1000),
+                         session_id=session_id, error=error)
+
     try:
         resp = requests.post(
             API_URL,
@@ -61,6 +72,7 @@ def _call_messages(prompt: str, model: str, max_tokens: int
             timeout=TIMEOUT,
         )
         if not resp.ok:
+            _trace(None, f"HTTP {resp.status_code}: {resp.text[:500]}")
             return None, None
         data = resp.json()
         parts = data.get("content") or []
@@ -71,8 +83,10 @@ def _call_messages(prompt: str, model: str, max_tokens: int
             "input_tokens": usage.get("input_tokens"),
             "output_tokens": usage.get("output_tokens"),
         } if usage else None
+        _trace(text, None if text else "empty response")
         return (text or None), usage_out
-    except (requests.RequestException, ValueError):
+    except (requests.RequestException, ValueError) as exc:
+        _trace(None, f"{type(exc).__name__}: {exc}")
         return None, None
 
 
@@ -118,7 +132,9 @@ def generate_summary(ticker: str, name: str, news: List[dict],
         f"activity for {ticker} in 4-6 sentences. Be factual, cite filing types "
         "and dates, flag anything an investor should note. Do not give buy/sell "
         "advice.\n\n" + context)
-    text, _ = _call_messages(prompt, MODEL, max_tokens=400)
+    text, _ = _call_messages(prompt, MODEL, max_tokens=400,
+                             session_id=prism_trace.session_id_for(
+                                 "news-summary", ticker))
     return text
 
 
@@ -144,7 +160,9 @@ def analyze_filing(form: str, filing_date: str, ticker: str, text: str,
         "Be factual and cite figures from the text. Do NOT give buy/sell advice. "
         "If the text is truncated, say so." + trunc_note
         + "\n\n--- FILING TEXT ---\n" + (text or ""))
-    out, usage = _call_messages(prompt, model, max_tokens=1024)
+    out, usage = _call_messages(prompt, model, max_tokens=1024,
+                                session_id=prism_trace.session_id_for(
+                                    "filings", ticker))
     return {"text": out, "usage": usage, "model": model}
 
 
@@ -170,5 +188,7 @@ def analyze_filing_activity(ticker: str, items: List[Dict[str, Any]],
         "describe what has been happening at the company based on this filing "
         "activity. Be factual, cite filing types and dates, flag anything "
         "notable. Do NOT give buy/sell advice.\n\n" + "\n".join(lines))
-    out, usage = _call_messages(prompt, model, max_tokens=512)
+    out, usage = _call_messages(prompt, model, max_tokens=512,
+                                session_id=prism_trace.session_id_for(
+                                    "filings", ticker))
     return {"text": out, "usage": usage, "model": model}
