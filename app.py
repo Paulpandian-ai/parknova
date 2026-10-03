@@ -1549,18 +1549,16 @@ def _er_filing_tab(ticker: str, name: str) -> None:
         index=0, key=f"er_filing_{ticker}")
     sel_f = ordered[sel_idx]
 
-    # Metadata row
+    # Compact metadata line (st.metric tiles are huge on mobile).
     url = sel_f.get("url", "")
-    c1, c2, c3, c4 = st.columns([1, 1, 2, 2])
-    c1.metric("Form", sel_f.get("form", ""))
-    c2.metric("Filed", sel_f.get("filingDate", ""))
-    c3.metric("Description", sel_f.get("primaryDocDescription") or "—")
-    with c4:
-        if url:
-            st.markdown(f'<a href="{url}" target="_blank" style="font-size:0.88rem;">'
-                        f'Open on SEC.gov ↗</a>', unsafe_allow_html=True)
+    desc = sel_f.get("primaryDocDescription") or ""
+    bits = [f"**{sel_f.get('form', '')}**", f"filed {sel_f.get('filingDate', '')}"]
+    if desc and desc != sel_f.get("form"):
+        bits.append(desc)
+    if url:
+        bits.append(f"[Open on SEC.gov]({url})")
+    st.markdown(" · ".join(bits))
 
-    st.write("")
     has_key = anth.has_anthropic_key()
     accn = sel_f.get("accessionNumber", "")
 
@@ -1568,15 +1566,13 @@ def _er_filing_tab(ticker: str, name: str) -> None:
         st.info(
             "Add **ANTHROPIC_API_KEY** to your environment to enable AI filing "
             "analysis. The EDGAR link above opens the raw filing.")
-        # Show any imported skill analyses for this filing
         imported = service.get_imported_analyses()
         norm = service.normalize_accession(accn)
         if norm in imported:
             st.caption("Imported skill analysis found.")
             _er_render_analysis(
                 imported[norm].get("analysis", {}).get("net_read") or
-                str(imported[norm].get("analysis", "")),
-                imported[norm].get("model"))
+                str(imported[norm].get("analysis", "")))
         return
 
     model_key = st.selectbox(
@@ -1585,20 +1581,19 @@ def _er_filing_tab(ticker: str, name: str) -> None:
         index=0, key=f"er_model_{ticker}")
     model = anth.MODEL_CHOICES[model_key]
 
-    # Check persistent disk cache first
-    er_cache_key = _ER_CACHE_PREFIX + accn
     from core import filing_cache
-    cached = filing_cache.load(er_cache_key, model)
+    cached = filing_cache.load(_ER_CACHE_PREFIX + accn, model)
     if cached is not None and cached.get("text"):
+        cached["cached"] = True
         _er_analysis_meta(cached)
-        _er_render_analysis(cached["text"], model)
+        _er_render_analysis(cached["text"])
         return
 
     if st.button("Analyze this filing", key=f"er_btn_{accn}_{model}",
                  type="primary"):
         with st.spinner(
                 f"Fetching {sel_f.get('form')} from EDGAR and running deep "
-                "analysis…"):
+                "analysis (can take 1-2 minutes)…"):
             result = service.equity_research_filing(
                 accession_number=accn,
                 model=model,
@@ -1611,9 +1606,9 @@ def _er_filing_tab(ticker: str, name: str) -> None:
             )
         if result.get("text"):
             _er_analysis_meta(result)
-            _er_render_analysis(result["text"], model)
+            _er_render_analysis(result["text"])
         else:
-            err = result.get("error", "Unknown error — try again.")
+            err = result.get("error") or "No response from the model."
             st.error(f"Analysis failed: {err}")
     else:
         st.caption(
@@ -1622,7 +1617,7 @@ def _er_filing_tab(ticker: str, name: str) -> None:
 
 
 def _er_analysis_meta(result: dict) -> None:
-    """Small metadata caption below the model selector."""
+    """Small metadata caption above the analysis."""
     bits = [f"model: {result.get('model', '?')}"]
     if result.get("cached"):
         bits.append("from cache")
@@ -1639,107 +1634,98 @@ def _er_analysis_meta(result: dict) -> None:
     st.caption(" · ".join(bits))
 
 
-def _er_render_analysis(text: str, model: str | None) -> None:
-    """Render the LLM-produced markdown analysis in a clean card."""
+def _er_render_analysis(text: str) -> None:
+    """Render LLM markdown (headings, bullets) inside a bordered card."""
     if not text:
         st.warning("No analysis text returned.")
         return
-    st.markdown(
-        f'<div style="background:var(--background-color,#fff);'
-        f'border:1px solid #e2e8f0;border-radius:8px;padding:1.25rem 1.5rem;'
-        f'margin-top:0.5rem;font-size:0.93rem;line-height:1.65;">'
-        f'{text.replace(chr(10), "<br>")}'
-        f'</div>',
-        unsafe_allow_html=True)
+    with st.container(border=True):
+        st.markdown(text)
 
 
 def _er_web_tab(ticker: str, name: str) -> None:
-    """Web Research sub-tab: question → DDG search → Claude synthesis."""
+    """Web Research sub-tab: question -> DuckDuckGo search -> Claude synthesis."""
     from core import equity_research as er
 
     has_key = anth.has_anthropic_key()
+    q_key = f"er_custom_{ticker}"
+    res_key = f"_er_web_result_{ticker}"
 
     st.markdown(
         '<div class="section-title">Ask a research question</div>',
         unsafe_allow_html=True)
 
-    # Quick-pick preset questions
     st.caption("Quick questions:")
     qcols = st.columns(2)
-    chosen_preset: str | None = None
     for i, q in enumerate(er.QUICK_QUESTIONS):
         if qcols[i % 2].button(q, key=f"er_preset_{ticker}_{i}",
                                use_container_width=True):
-            chosen_preset = q
+            # Must be set before the keyed text_input renders this run.
+            st.session_state[q_key] = q
 
-    st.write("")
-    custom = st.text_input(
+    question = (st.text_input(
         "Custom question",
-        value=chosen_preset or "",
         placeholder=f"E.g. What is {ticker}'s revenue growth trend?",
-        key=f"er_custom_{ticker}")
+        key=q_key) or "").strip()
 
-    question = (custom or "").strip()
+    model = None
+    if has_key:
+        model = anth.MODEL_CHOICES[st.selectbox(
+            "Synthesis model", list(anth.MODEL_CHOICES.keys()),
+            index=0, key=f"er_web_model_{ticker}")]
+
     if not question:
         st.info("Type a question or pick one above.")
         return
 
-    search_query = er.build_search_query(ticker, name, question)
+    if st.button("Search & Summarize", key=f"er_search_{ticker}",
+                 type="primary"):
+        with st.spinner("Searching the web…"):
+            snippets = service.equity_web_search(
+                er.build_search_query(ticker, name, question), max_results=6)
+        result = None
+        if snippets and has_key:
+            with st.spinner("Synthesizing…"):
+                result = anth.equity_research_web(
+                    ticker, name, question, snippets, model=model)
+        st.session_state[res_key] = {
+            "question": question, "snippets": snippets, "result": result}
 
-    run_btn = st.button("Search & Summarize", key=f"er_search_{ticker}",
-                        type="primary")
-    if not run_btn:
+    saved = st.session_state.get(res_key)
+    if not saved:
         return
+    if saved["question"] != question:
+        st.caption(f"Showing results for: {saved['question']}")
 
-    with st.spinner("Searching the web…"):
-        snippets = service.equity_web_search(search_query, max_results=6)
-
+    snippets = saved["snippets"]
     if not snippets:
         st.warning(
             "No web results returned. The search service may be unavailable; "
             "try rephrasing the question.")
         return
 
-    # Show sources
-    with st.expander(f"Web sources ({len(snippets)} results)", expanded=False):
-        for i, s in enumerate(snippets):
-            st.markdown(
-                f"**[{i+1}] {s.get('title', '')}**  \n"
-                f"<{s.get('url', '')}>  \n"
-                f"_{s.get('snippet', '')}_")
-
+    result = saved["result"]
     if not has_key:
-        st.info(
-            "Add **ANTHROPIC_API_KEY** to synthesize results with AI. "
-            "Raw web sources shown above.")
-        return
-
-    model_key = st.selectbox(
-        "Synthesis model",
-        list(anth.MODEL_CHOICES.keys()),
-        index=0, key=f"er_web_model_{ticker}")
-    model = anth.MODEL_CHOICES[model_key]
-
-    with st.spinner("Synthesizing…"):
-        result = anth.equity_research_web(ticker, name, question, snippets,
-                                          model=model)
-
-    if result.get("text"):
+        st.info("Add **ANTHROPIC_API_KEY** to synthesize results with AI. "
+                "Raw web sources below.")
+    elif result and result.get("text"):
         u = result.get("usage") or {}
         st.caption(
             f"model: {result.get('model', '?')} · "
             f"tokens: {u.get('input_tokens', '?')} in / "
             f"{u.get('output_tokens', '?')} out")
-        st.markdown(
-            f'<div style="background:var(--background-color,#fff);'
-            f'border:1px solid #e2e8f0;border-radius:8px;'
-            f'padding:1.25rem 1.5rem;margin-top:0.5rem;'
-            f'font-size:0.93rem;line-height:1.65;">'
-            f'{result["text"].replace(chr(10), "<br>")}'
-            f'</div>',
-            unsafe_allow_html=True)
+        _er_render_analysis(result["text"])
     else:
-        st.error("Synthesis failed — check the API key and try again.")
+        err = (result or {}).get("error") or "No response from the model."
+        st.error(f"Synthesis failed: {err}")
+
+    with st.expander(f"Web sources ({len(snippets)} results)",
+                     expanded=not has_key):
+        for i, s in enumerate(snippets):
+            st.markdown(
+                f"**[{i+1}] {s.get('title', '')}**  \n"
+                f"<{s.get('url', '')}>  \n"
+                f"_{s.get('snippet', '')}_")
 
 
 # ---------------------------------------------------------------------------

@@ -15,7 +15,9 @@ import requests
 from core.config import get_secret
 
 API_URL = "https://api.anthropic.com/v1/messages"
-TIMEOUT = 60
+# (connect, read). A 60k-char filing with a 2k-token answer can take well over
+# a minute on Sonnet, so the read timeout must be generous.
+TIMEOUT = (10, 240)
 
 # Model registry (configurable, not hardcoded in three places).
 # Default to the cheapest/fastest model for on-demand filing analysis.
@@ -35,16 +37,29 @@ def has_anthropic_key() -> bool:
     return bool(get_secret("ANTHROPIC_API_KEY"))
 
 
+def _api_error(resp: requests.Response) -> str:
+    """Human-readable reason from a non-2xx Messages API response."""
+    try:
+        err = (resp.json() or {}).get("error") or {}
+        etype, msg = err.get("type"), err.get("message")
+    except ValueError:
+        etype, msg = None, None
+    detail = f"{etype}: {msg}" if etype and msg else (msg or resp.text[:200])
+    return f"Anthropic API returned HTTP {resp.status_code} ({detail})"
+
+
 def _call_messages(prompt: str, model: str, max_tokens: int
-                   ) -> Tuple[Optional[str], Optional[Dict[str, int]]]:
+                   ) -> Tuple[Optional[str], Optional[Dict[str, int]],
+                              Optional[str]]:
     """POST one user message to the Messages API.
 
-    Returns ``(text, usage)`` where usage is ``{input_tokens, output_tokens}``
-    when the API provides it. On any failure returns ``(None, None)``.
+    Returns ``(text, usage, error)``. ``usage`` is ``{input_tokens,
+    output_tokens}`` when provided. On failure ``text`` is None and ``error``
+    explains why (missing key, HTTP status + API message, timeout, refusal).
     """
     key = get_secret("ANTHROPIC_API_KEY")
     if not key:
-        return None, None
+        return None, None, "ANTHROPIC_API_KEY is not set."
     try:
         resp = requests.post(
             API_URL,
@@ -61,7 +76,7 @@ def _call_messages(prompt: str, model: str, max_tokens: int
             timeout=TIMEOUT,
         )
         if not resp.ok:
-            return None, None
+            return None, None, _api_error(resp)
         data = resp.json()
         parts = data.get("content") or []
         text = "".join(p.get("text", "") for p in parts
@@ -71,9 +86,19 @@ def _call_messages(prompt: str, model: str, max_tokens: int
             "input_tokens": usage.get("input_tokens"),
             "output_tokens": usage.get("output_tokens"),
         } if usage else None
-        return (text or None), usage_out
-    except (requests.RequestException, ValueError):
-        return None, None
+        if not text:
+            return None, usage_out, (
+                f"Model returned no text (stop_reason: "
+                f"{data.get('stop_reason') or 'unknown'}).")
+        return text, usage_out, None
+    except requests.Timeout:
+        return None, None, (
+            f"Request to Anthropic timed out after {TIMEOUT[1]}s. Try the "
+            "Haiku model or retry.")
+    except requests.RequestException as exc:
+        return None, None, f"Network error calling Anthropic: {exc}"
+    except ValueError:
+        return None, None, "Could not parse the Anthropic API response."
 
 
 def _format_context(ticker: str, name: str, news: List[dict], filings: List[dict],
@@ -118,7 +143,7 @@ def generate_summary(ticker: str, name: str, news: List[dict],
         f"activity for {ticker} in 4-6 sentences. Be factual, cite filing types "
         "and dates, flag anything an investor should note. Do not give buy/sell "
         "advice.\n\n" + context)
-    text, _ = _call_messages(prompt, MODEL, max_tokens=400)
+    text, _, _ = _call_messages(prompt, MODEL, max_tokens=400)
     return text
 
 
@@ -144,8 +169,8 @@ def analyze_filing(form: str, filing_date: str, ticker: str, text: str,
         "Be factual and cite figures from the text. Do NOT give buy/sell advice. "
         "If the text is truncated, say so." + trunc_note
         + "\n\n--- FILING TEXT ---\n" + (text or ""))
-    out, usage = _call_messages(prompt, model, max_tokens=1024)
-    return {"text": out, "usage": usage, "model": model}
+    out, usage, err = _call_messages(prompt, model, max_tokens=1024)
+    return {"text": out, "usage": usage, "model": model, "error": err}
 
 
 def equity_research_filing(
@@ -166,8 +191,8 @@ def equity_research_filing(
     """
     from core.equity_research import filing_research_prompt
     prompt = filing_research_prompt(ticker, name, form, filing_date, text, truncated)
-    out, usage = _call_messages(prompt, model, max_tokens=2000)
-    return {"text": out, "usage": usage, "model": model}
+    out, usage, err = _call_messages(prompt, model, max_tokens=4000)
+    return {"text": out, "usage": usage, "model": model, "error": err}
 
 
 def equity_research_web(
@@ -183,8 +208,8 @@ def equity_research_web(
     """
     from core.equity_research import web_research_prompt
     prompt = web_research_prompt(ticker, name, question, snippets)
-    out, usage = _call_messages(prompt, model, max_tokens=800)
-    return {"text": out, "usage": usage, "model": model}
+    out, usage, err = _call_messages(prompt, model, max_tokens=800)
+    return {"text": out, "usage": usage, "model": model, "error": err}
 
 
 def analyze_filing_activity(ticker: str, items: List[Dict[str, Any]],
@@ -209,5 +234,5 @@ def analyze_filing_activity(ticker: str, items: List[Dict[str, Any]],
         "describe what has been happening at the company based on this filing "
         "activity. Be factual, cite filing types and dates, flag anything "
         "notable. Do NOT give buy/sell advice.\n\n" + "\n".join(lines))
-    out, usage = _call_messages(prompt, model, max_tokens=512)
-    return {"text": out, "usage": usage, "model": model}
+    out, usage, err = _call_messages(prompt, model, max_tokens=512)
+    return {"text": out, "usage": usage, "model": model, "error": err}
