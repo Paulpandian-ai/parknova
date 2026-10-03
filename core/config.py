@@ -28,13 +28,21 @@ def get_secret(name: str, default: Optional[str] = None) -> Optional[str]:
         # Membership check avoids a KeyError on missing keys; the whole block is
         # guarded because st.secrets raises when no secrets file is present.
         if name in st.secrets:
-            val = st.secrets[name]
-            if val is not None and str(val) != "":
-                return str(val)
+            val = _clean(st.secrets[name])
+            if val:
+                return val
     except Exception:
         pass
 
-    val = os.environ.get(name)
-    if val is not None and val != "":
+    val = _clean(os.environ.get(name))
+    if val:
         return val
     return default
+
+
+def _clean(val) -> Optional[str]:
+    # Pasted keys often carry a trailing newline/space or wrapping quotes,
+    # which providers reject as "invalid key".
+    if val is None:
+        return None
+    return str(val).strip().strip('"').strip("'").strip()

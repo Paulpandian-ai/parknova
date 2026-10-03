@@ -116,3 +116,11 @@ def test_view_shows_real_error_message():
     errors = " ".join(e.value for e in at.error)
     assert "invalid x-api-key" in errors
     assert "Unknown error" not in errors
+
+
+def test_secret_whitespace_and_quotes_stripped(monkeypatch):
+    from core import config
+    monkeypatch.setenv("PN_TEST_KEY", '  "sk-ant-abc123"\n')
+    assert config.get_secret("PN_TEST_KEY") == "sk-ant-abc123"
+    monkeypatch.setenv("PN_TEST_KEY", "   \n")
+    assert config.get_secret("PN_TEST_KEY", "dflt") == "dflt"
