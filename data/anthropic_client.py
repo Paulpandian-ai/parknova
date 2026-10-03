@@ -148,6 +148,45 @@ def analyze_filing(form: str, filing_date: str, ticker: str, text: str,
     return {"text": out, "usage": usage, "model": model}
 
 
+def equity_research_filing(
+    ticker: str,
+    name: str,
+    form: str,
+    filing_date: str,
+    text: str,
+    truncated: bool = False,
+    model: str = DEFAULT_MODEL,
+) -> Dict[str, Any]:
+    """Deep structured filing analysis for the Equity Research tab.
+
+    Produces a 7-section report (Overview / Financial Highlights / Business
+    Findings / Risk Factors / Forward-Looking Statements / Red Flags / Net
+    Assessment). Returns the same ``{text, usage, model}`` shape as
+    :func:`analyze_filing`.
+    """
+    from core.equity_research import filing_research_prompt
+    prompt = filing_research_prompt(ticker, name, form, filing_date, text, truncated)
+    out, usage = _call_messages(prompt, model, max_tokens=2000)
+    return {"text": out, "usage": usage, "model": model}
+
+
+def equity_research_web(
+    ticker: str,
+    name: str,
+    question: str,
+    snippets: List[Dict[str, Any]],
+    model: str = DEFAULT_MODEL,
+) -> Dict[str, Any]:
+    """Synthesize web search snippets into a factual answer for ``question``.
+
+    Returns ``{text, usage, model}``.
+    """
+    from core.equity_research import web_research_prompt
+    prompt = web_research_prompt(ticker, name, question, snippets)
+    out, usage = _call_messages(prompt, model, max_tokens=800)
+    return {"text": out, "usage": usage, "model": model}
+
+
 def analyze_filing_activity(ticker: str, items: List[Dict[str, Any]],
                             model: str = DEFAULT_MODEL) -> Dict[str, Any]:
     """Synthesize the last few filings (metadata + any per-filing analyses).

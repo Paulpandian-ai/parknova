@@ -1482,6 +1482,267 @@ def _run_activity_synthesis(ticker: str, filings: list, model: str):
 
 
 # ---------------------------------------------------------------------------
+# View: Equity Research
+# ---------------------------------------------------------------------------
+_ER_CACHE_PREFIX = "ER__"  # distinguishes deep-analysis entries in filing_cache
+
+
+def view_equity_research(full: pd.DataFrame):
+    st.markdown('<div class="view-title">Equity Research</div>',
+                unsafe_allow_html=True)
+    options = full["Ticker"].tolist()
+    labels = dict(zip(full["Ticker"], full["Name"]))
+    ticker = st.selectbox(
+        "Ticker", options, index=None,
+        placeholder="Select a ticker…",
+        format_func=lambda t: f"{t} · {labels.get(t, '')}",
+        key="er_ticker")
+
+    if ticker is None:
+        st.info("Select a ticker to begin equity research.")
+        return
+
+    row = full[full["Ticker"] == ticker].iloc[0]
+    name = row.get("Name") or ticker
+
+    # Header
+    rating = row.get("Morningstar Rating for Stocks")
+    head = (
+        f'<div class="detail-head"><div class="name">{name} '
+        f'<span class="tk">{ticker}</span></div>'
+        f'<div class="meta">{cp.bucket_chip(row.get("Primary Bucket"))} '
+        f'{cp.crest_chip(row.get("Crest"))} &nbsp; '
+        f'<span class="stars">{cp.fmt_stars(rating)}</span> &nbsp; '
+        f'upside {cp.fmt_pct_frac(row.get("upside_pct"))}</div></div>')
+    st.markdown(head, unsafe_allow_html=True)
+
+    t_filing, t_web = st.tabs(["Filing Analysis", "Web Research"])
+    with t_filing:
+        _er_filing_tab(ticker, name)
+    with t_web:
+        _er_web_tab(ticker, name)
+
+
+def _er_filing_tab(ticker: str, name: str) -> None:
+    """Filing Analysis sub-tab: auto-selects latest 10-K/10-Q, runs deep LLM read."""
+    from core import equity_research as er
+
+    filings = service.get_sec_filings(ticker, limit=20)
+
+    if not filings:
+        st.warning(
+            f"No SEC filings found on EDGAR for {ticker}. "
+            "The ticker may not be listed on a US exchange or may be too new.")
+        return
+
+    # Build a selector list; sort periodics to the top.
+    _PERIODIC = {"10-K", "10-Q", "10-K/A", "10-Q/A"}
+    periodic = [f for f in filings if f.get("form") in _PERIODIC]
+    others = [f for f in filings if f.get("form") not in _PERIODIC]
+    ordered = periodic[:8] + others[:7]
+
+    option_labels = [
+        f"{f.get('form')} — {f.get('filingDate')}" for f in ordered]
+    sel_idx = st.selectbox(
+        "Filing", range(len(option_labels)),
+        format_func=lambda i: option_labels[i],
+        index=0, key=f"er_filing_{ticker}")
+    sel_f = ordered[sel_idx]
+
+    # Metadata row
+    url = sel_f.get("url", "")
+    c1, c2, c3, c4 = st.columns([1, 1, 2, 2])
+    c1.metric("Form", sel_f.get("form", ""))
+    c2.metric("Filed", sel_f.get("filingDate", ""))
+    c3.metric("Description", sel_f.get("primaryDocDescription") or "—")
+    with c4:
+        if url:
+            st.markdown(f'<a href="{url}" target="_blank" style="font-size:0.88rem;">'
+                        f'Open on SEC.gov ↗</a>', unsafe_allow_html=True)
+
+    st.write("")
+    has_key = anth.has_anthropic_key()
+    accn = sel_f.get("accessionNumber", "")
+
+    if not has_key:
+        st.info(
+            "Add **ANTHROPIC_API_KEY** to your environment to enable AI filing "
+            "analysis. The EDGAR link above opens the raw filing.")
+        # Show any imported skill analyses for this filing
+        imported = service.get_imported_analyses()
+        norm = service.normalize_accession(accn)
+        if norm in imported:
+            st.caption("Imported skill analysis found.")
+            _er_render_analysis(
+                imported[norm].get("analysis", {}).get("net_read") or
+                str(imported[norm].get("analysis", "")),
+                imported[norm].get("model"))
+        return
+
+    model_key = st.selectbox(
+        "Analysis model",
+        list(anth.MODEL_CHOICES.keys()),
+        index=0, key=f"er_model_{ticker}")
+    model = anth.MODEL_CHOICES[model_key]
+
+    # Check persistent disk cache first
+    er_cache_key = _ER_CACHE_PREFIX + accn
+    from core import filing_cache
+    cached = filing_cache.load(er_cache_key, model)
+    if cached is not None and cached.get("text"):
+        _er_analysis_meta(cached)
+        _er_render_analysis(cached["text"], model)
+        return
+
+    if st.button("Analyze this filing", key=f"er_btn_{accn}_{model}",
+                 type="primary"):
+        with st.spinner(
+                f"Fetching {sel_f.get('form')} from EDGAR and running deep "
+                "analysis…"):
+            result = service.equity_research_filing(
+                accession_number=accn,
+                model=model,
+                cik=sel_f.get("cik"),
+                primary_document=sel_f.get("primaryDocument", ""),
+                form=sel_f.get("form", ""),
+                filing_date=sel_f.get("filingDate", ""),
+                ticker=ticker,
+                name=name,
+            )
+        if result.get("text"):
+            _er_analysis_meta(result)
+            _er_render_analysis(result["text"], model)
+        else:
+            err = result.get("error", "Unknown error — try again.")
+            st.error(f"Analysis failed: {err}")
+    else:
+        st.caption(
+            "Analysis is persisted to disk after the first run; "
+            "subsequent loads are instant and free.")
+
+
+def _er_analysis_meta(result: dict) -> None:
+    """Small metadata caption below the model selector."""
+    bits = [f"model: {result.get('model', '?')}"]
+    if result.get("cached"):
+        bits.append("from cache")
+    if result.get("truncated"):
+        bits.append("text was truncated")
+    meth = result.get("method")
+    if meth and meth != "full":
+        bits.append(f"extraction: {meth}")
+    if result.get("usage"):
+        u = result["usage"]
+        bits.append(
+            f"tokens: {u.get('input_tokens', '?')} in / "
+            f"{u.get('output_tokens', '?')} out")
+    st.caption(" · ".join(bits))
+
+
+def _er_render_analysis(text: str, model: str | None) -> None:
+    """Render the LLM-produced markdown analysis in a clean card."""
+    if not text:
+        st.warning("No analysis text returned.")
+        return
+    st.markdown(
+        f'<div style="background:var(--background-color,#fff);'
+        f'border:1px solid #e2e8f0;border-radius:8px;padding:1.25rem 1.5rem;'
+        f'margin-top:0.5rem;font-size:0.93rem;line-height:1.65;">'
+        f'{text.replace(chr(10), "<br>")}'
+        f'</div>',
+        unsafe_allow_html=True)
+
+
+def _er_web_tab(ticker: str, name: str) -> None:
+    """Web Research sub-tab: question → DDG search → Claude synthesis."""
+    from core import equity_research as er
+
+    has_key = anth.has_anthropic_key()
+
+    st.markdown(
+        '<div class="section-title">Ask a research question</div>',
+        unsafe_allow_html=True)
+
+    # Quick-pick preset questions
+    st.caption("Quick questions:")
+    qcols = st.columns(2)
+    chosen_preset: str | None = None
+    for i, q in enumerate(er.QUICK_QUESTIONS):
+        if qcols[i % 2].button(q, key=f"er_preset_{ticker}_{i}",
+                               use_container_width=True):
+            chosen_preset = q
+
+    st.write("")
+    custom = st.text_input(
+        "Custom question",
+        value=chosen_preset or "",
+        placeholder=f"E.g. What is {ticker}'s revenue growth trend?",
+        key=f"er_custom_{ticker}")
+
+    question = (custom or "").strip()
+    if not question:
+        st.info("Type a question or pick one above.")
+        return
+
+    search_query = er.build_search_query(ticker, name, question)
+
+    run_btn = st.button("Search & Summarize", key=f"er_search_{ticker}",
+                        type="primary")
+    if not run_btn:
+        return
+
+    with st.spinner("Searching the web…"):
+        snippets = service.equity_web_search(search_query, max_results=6)
+
+    if not snippets:
+        st.warning(
+            "No web results returned. The search service may be unavailable; "
+            "try rephrasing the question.")
+        return
+
+    # Show sources
+    with st.expander(f"Web sources ({len(snippets)} results)", expanded=False):
+        for i, s in enumerate(snippets):
+            st.markdown(
+                f"**[{i+1}] {s.get('title', '')}**  \n"
+                f"<{s.get('url', '')}>  \n"
+                f"_{s.get('snippet', '')}_")
+
+    if not has_key:
+        st.info(
+            "Add **ANTHROPIC_API_KEY** to synthesize results with AI. "
+            "Raw web sources shown above.")
+        return
+
+    model_key = st.selectbox(
+        "Synthesis model",
+        list(anth.MODEL_CHOICES.keys()),
+        index=0, key=f"er_web_model_{ticker}")
+    model = anth.MODEL_CHOICES[model_key]
+
+    with st.spinner("Synthesizing…"):
+        result = anth.equity_research_web(ticker, name, question, snippets,
+                                          model=model)
+
+    if result.get("text"):
+        u = result.get("usage") or {}
+        st.caption(
+            f"model: {result.get('model', '?')} · "
+            f"tokens: {u.get('input_tokens', '?')} in / "
+            f"{u.get('output_tokens', '?')} out")
+        st.markdown(
+            f'<div style="background:var(--background-color,#fff);'
+            f'border:1px solid #e2e8f0;border-radius:8px;'
+            f'padding:1.25rem 1.5rem;margin-top:0.5rem;'
+            f'font-size:0.93rem;line-height:1.65;">'
+            f'{result["text"].replace(chr(10), "<br>")}'
+            f'</div>',
+            unsafe_allow_html=True)
+    else:
+        st.error("Synthesis failed — check the API key and try again.")
+
+
+# ---------------------------------------------------------------------------
 # View: Stock Detail
 # ---------------------------------------------------------------------------
 _DETAIL_WINDOWS = {"1W": pd.DateOffset(weeks=1), "1M": pd.DateOffset(months=1),
@@ -3196,7 +3457,7 @@ def view_what_changed() -> None:
 # ---------------------------------------------------------------------------
 NAV_ITEMS = ["Performance", "Fundamentals & Factors", "Screener", "Buckets",
              "Capex Cycle", "Barometer", "Signals", "Portfolios", "What Changed",
-             "News & Filings", "Stock Detail", "Thesis"]
+             "News & Filings", "Equity Research", "Stock Detail", "Thesis"]
 
 
 def main():
@@ -3292,6 +3553,8 @@ def main():
         view_what_changed()
     elif selected == "News & Filings":
         view_news(full)
+    elif selected == "Equity Research":
+        view_equity_research(full)
     elif selected == "Stock Detail":
         view_detail(full, scores)
     elif selected == "Thesis":

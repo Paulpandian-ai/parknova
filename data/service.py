@@ -459,6 +459,78 @@ def analyze_filing_activity(ticker: str, model: str,
     return result
 
 
+# ---------------------------------------------------------------------------
+# Equity Research: web search + deep filing analysis
+# ---------------------------------------------------------------------------
+@st.cache_resource
+def get_web_search_client():
+    from data.web_search import WebSearchClient
+    return WebSearchClient()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def equity_web_search(query: str, max_results: int = 5) -> List[dict]:
+    """DuckDuckGo web search, cached 1 hour (no API key required)."""
+    try:
+        return get_web_search_client().search(query, max_results=max_results)
+    except Exception:
+        return []
+
+
+def get_latest_periodic_filing(ticker: str) -> Optional[dict]:
+    """Return the most recent 10-K or 10-Q for ``ticker``, or None."""
+    filings = get_sec_filings(ticker, limit=20)
+    for f in filings:
+        if f.get("form") in ("10-K", "10-Q", "10-K/A", "10-Q/A"):
+            return f
+    return None
+
+
+def equity_research_filing(
+    accession_number: str,
+    model: str,
+    cik: int,
+    primary_document: str,
+    form: str,
+    filing_date: str,
+    ticker: str,
+    name: str,
+) -> dict:
+    """Fetch → trim → deep-analyze one filing for the Equity Research tab.
+
+    Uses a distinct cache-key prefix (``"ER__"`` + accession) so results are
+    stored separately from the standard ``analyze_filing`` entries. Returns the
+    same ``{text, usage, model, method, truncated, cached, error?}`` shape.
+    """
+    er_key = "ER__" + accession_number
+    existing = filing_cache.load(er_key, model)
+    if existing is not None:
+        existing["cached"] = True
+        return existing
+
+    from data import anthropic_client as anth
+    from data.edgar_client import trim_for_analysis
+
+    raw = get_filing_document_text(cik, accession_number, primary_document)
+    if not raw:
+        return {
+            "text": None, "usage": None, "model": model, "method": "none",
+            "truncated": False, "cached": False,
+            "error": "Could not fetch the filing document from EDGAR.",
+        }
+    trimmed = trim_for_analysis(form, raw)
+    result = anth.equity_research_filing(
+        ticker, name, form, filing_date,
+        trimmed["text"], truncated=trimmed["truncated"], model=model,
+    )
+    result["method"] = trimmed["method"]
+    result["truncated"] = trimmed["truncated"]
+    result["cached"] = False
+    if result.get("text"):
+        filing_cache.save(er_key, model, result)
+    return result
+
+
 def clear_live_caches() -> None:
     """Clear the live caches (Morningstar load + EDGAR CIK map are untouched).
 
